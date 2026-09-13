@@ -6,7 +6,7 @@ fn main() {
 # self-assignment operators: ++ --  and compound assigns: += -= *= /= %=
 # they lower to plain `x = x op y` assignments in the transpiled C
 
-# increment and decrement
+// increment and increment
 int32 i = 0
 i++
 print(i, "\n") # 1

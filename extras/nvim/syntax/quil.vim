@@ -23,15 +23,11 @@ highlight link quilDirective PreProc
 highlight link quilLib Special
 
 " 2. Keywords
-syntax keyword quilKeyword if else while for break continue return fn
+syntax keyword quilKeyword if else while for break continue return fn scope public extern import
 highlight link quilKeyword Statement
 
-" 3. Builtins
-syntax keyword quilBuiltin print read println
-highlight link quilBuiltin Function
-
-" 4. Data Types & Prefixes
-syntax keyword quilType int float double char string bool long short signed unsigned vec
+" 3. Data Types & Prefixes
+syntax keyword quilType int8 int16 int32 int64 uint8 uint16 uint32 uint64 float32 float64 char string bool
 highlight link quilType Type
 
 " 5. Booleans
@@ -53,12 +49,12 @@ highlight link quilChar Character
 " 8. Operators and Symbols
 " We group these so they don't look like plain text
 syntax match quilOperator "[+=\-\*/%&^|!<>?~]"
-syntax match quilDelimiter "[()\[\]{};,.]"
+syntax match quilDelimiter "[()\[\]{};:,.]"
 highlight link quilOperator Operator
 highlight link quilDelimiter Delimiter
 
 " 9. Comments
-syntax match quilComment "#.*$"
+syntax match quilComment "//.*$"
 highlight link quilComment Comment
 
 " 10. Special Escapes (the \n, \t stuff)

@@ -21,7 +21,6 @@
 #include "../include/parser.h"
 #include "../include/sema.h"
 #include "../include/ssagen.h"
-// #include "../include/codegen_c.h" // kept for reference, excluded from pipeline (single backend: ssagen+feather)
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
