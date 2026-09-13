@@ -33,10 +33,10 @@
  *            put tokens in a single line in a token_list -> pass the token_list to parser ->
  *            turn the list into a ASTnode (syntax tree) -> pass the ast to parser to be parsed ->
  *            check the codegen mode (engine or normal) -> pass the parsed nodes (normal codegen or engine codegen) to be compiled into C ->
- *            generate payload.c -> compile payload.c to payload (linux)
+ *            generate payload.c -> compile payload.asm to payload (linux)
  *
  *            file.quil (input) -> src/main.c -> src/lexer.c src/lexer_filter.c src/helper.c -> src/main.c -> src/parser.c src/helper.c ->
- *            src/ast.c -> src/parser.c -> src/main.c -> src/codegen.c = payload/payload.bin (output)
+ *            src/ast.c -> src/parser.c -> src/sema.c -> src/main.c -> src/ssagen = payload/payload.bin (output)
  *
  *            The CLI (flag parsing, --help/--version/--update) lives in src/cli.c.
  */
@@ -100,21 +100,6 @@ int main(int argc, char *argv[]) {
         token_list_init(&list);
         token tokens = lexer_tokenizer(buffer);
         while (tokens.type != TOKEN_EOF) {
-                // checking the tokens for specific types before adding it to the list
-                if (tokens.type == TOKEN_HASHTAG) {
-                        tokens = token_ignore_comment(tokens, buffer);
-                        if (tokens.type == TOKEN_NLINE) {
-                                token_list_add(&list, tokens);
-                                if (opts.debug_lexer) {
-                                        // NOTE: this function call is for debugging purposes.
-                                        lexer_print_token(tokens);
-                                }
-                                // Get next token for the next line
-                                tokens = lexer_tokenizer(buffer);
-                        }
-                        continue;
-                }
-
                 token_list_add(&list, tokens);
                 if (opts.debug_lexer) {
                         // NOTE: this function call is for debugging purposes.

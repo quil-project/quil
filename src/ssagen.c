@@ -109,6 +109,25 @@ static Ref emit_expr(Ssagen *s, ASTnode *n) {
                 if (cls == Kd) return il_create_load_d(s->ilb, slot);
                 return il_create_load_w(s->ilb, slot); // Kw bool char int8/16/32
         }
+        case NODE_ARRAY_ACCESS: { // arr[i] -> *(base + i * size)
+                bool found;
+                Ref *sp = hashmap_get(s->slots, n->data.array_access.name, &found);
+                Ref base = *sp;
+
+                Ref idx = emit_expr(s, n->data.array_access.index);
+                int idx_cls = quil_to_cls(n->data.array_access.index->resolved_type);
+                int elem_cls = quil_to_cls(n->resolved_type);
+                int sz = (elem_cls == Kl || elem_cls == Kd) ? 8 : 4;
+                Ref off = (idx_cls == Kl) ? il_create_mul_l(s->ilb, idx, il_const_int_l(s->ilb, sz))
+                                          : il_create_mul_w(s->ilb, idx, il_const_int_w(s->ilb, sz));
+                Ref off_l = (idx_cls == Kl) ? off : il_create_extsw_l(s->ilb, off);
+                Ref addr = il_create_add_l(s->ilb, base, off_l); // Kl
+
+                if (elem_cls == Kl) return il_create_load_l(s->ilb, addr);
+                if (elem_cls == Ks) return il_create_load_s(s->ilb, addr);
+                if (elem_cls == Kd) return il_create_load_d(s->ilb, addr);
+                return il_create_load_w(s->ilb, addr);
+        }
         /* binray unary ternary expressions */
         case NODE_BINARY_EXPRESSION: {
                 Ref l = emit_expr(s, n->data.binary_expression.left);

@@ -176,7 +176,20 @@ token lexer_tokenizer(FILE *buffer) {
                         tokens.value = strdup("/");
                 } else {
                         ch = lexer_getc(buffer);
-                        if (ch == '=') {
+                        if (ch == '/') {
+                                // // line comment: discard to newline or EOF
+                                int c;
+                                do {
+                                        c = lexer_getc(buffer);
+                                } while (c != '\n' && c != EOF);
+                                if (c == EOF) {
+                                        tokens.type = TOKEN_EOF;
+                                        tokens.value = strdup("EOF");
+                                } else {
+                                        tokens.type = TOKEN_NLINE;
+                                        tokens.value = strdup("\\n");
+                                }
+                        } else if (ch == '=') {
                                 tokens.type = TOKEN_FSEQUAL;
                                 tokens.value = strdup("/=");
                         } else {
@@ -336,7 +349,7 @@ token lexer_tokenizer(FILE *buffer) {
                         tokens.type = TOKEN_QSTRING;
                         tokens.value = strdup("#");
                 } else {
-                        tokens.type = TOKEN_HASHTAG;
+                        tokens.type = TOKEN_UNKNOWN;
                         tokens.value = strdup("#");
                 }
                 break;
@@ -907,8 +920,6 @@ const char *lexer_token_type_to_string(tokenType type) {
                 return "TOKEN_EXCLAMATION";
         case TOKEN_ATSIGN:
                 return "TOKEN_ATSIGN";
-        case TOKEN_HASHTAG:
-                return "TOKEN_HASHTAG";
         case TOKEN_DOLLAR:
                 return "TOKEN_DOLLAR";
         case TOKEN_PERCENT:
