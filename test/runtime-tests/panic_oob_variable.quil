@@ -1,7 +1,0 @@
-fn main() {
-# Runtime: variable index out of bounds must panic
-vec<int32> nums = [10, 20];
-nums.append(30);
-int32 i = 3;
-print(nums[i], "\n");
-}

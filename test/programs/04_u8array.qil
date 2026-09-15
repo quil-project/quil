@@ -1,0 +1,8 @@
+// expect: 155
+// uint8[10] must take 10 bytes (alloc4 10), stride 1, byte stores/loads
+public fn main() -> int32 {
+ uint8[10] arr
+ arr[0] = 100
+ arr[9] = 55
+ return arr[0] + arr[9]
+}

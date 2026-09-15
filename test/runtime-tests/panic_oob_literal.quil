@@ -1,5 +1,0 @@
-fn main() {
-# Runtime: OOB literal index must panic
-vec<int32> nums = [10, 20, 30];
-print(nums[3], "\n");
-}

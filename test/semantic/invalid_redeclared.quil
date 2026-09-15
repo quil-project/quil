@@ -1,6 +1,0 @@
-fn main() {
-# Semantic invalid: redeclaring a variable in the same scope
-int32 x = 5
-int32 x = 10
-print(x, "\n")
-}

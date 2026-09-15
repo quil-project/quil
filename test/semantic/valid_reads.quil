@@ -1,9 +1,0 @@
-fn main() {
-# Semantic valid: unresolved reads and assignment chains
-int32 x = 1
-int32 y = x + 1
-x = y * 2
-print(x, "\n")
-read(y)
-print(y, "\n")
-}

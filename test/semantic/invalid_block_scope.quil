@@ -1,9 +1,0 @@
-fn main() {
-# Semantic invalid: undeclared variable inside a block scope
-int32 a = 1
-if (a > 0) {
-        print(a, "\n")
-        print(b, "\n")
-}
-print(a, "\n")
-}

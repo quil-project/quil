@@ -1,0 +1,7 @@
+// expect: 9
+// arithmetic, vars, ternary
+public fn main() -> int32 {
+ int32 x = 1 + 2
+ int32 t = x > 2 ? 10 : 20
+ return t - 1
+}

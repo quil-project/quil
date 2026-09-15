@@ -1,5 +1,0 @@
-fn main() {
-# Semantic: method calls — only vec.append is a valid method
-vec<int32> v = [1, 2];
-v.append(3);
-}

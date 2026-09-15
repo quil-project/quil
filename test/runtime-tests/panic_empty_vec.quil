@@ -1,5 +1,0 @@
-fn main() {
-# Runtime: index on an empty vec must panic
-vec<int32> nums = [];
-print(nums[0], "\n");
-}

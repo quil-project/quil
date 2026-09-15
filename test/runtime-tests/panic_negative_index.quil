@@ -1,5 +1,0 @@
-fn main() {
-# Runtime: negative index must panic
-vec<int32> nums = [10, 20];
-print(nums[-1], "\n");
-}

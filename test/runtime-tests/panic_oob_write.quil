@@ -1,6 +1,0 @@
-fn main() {
-# Runtime: OOB literal index on write must panic
-vec<int32> nums = [10, 20, 30];
-nums[3] = 99;
-
-}

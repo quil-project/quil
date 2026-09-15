@@ -196,6 +196,8 @@ static void sem_analyze_node(SemAnalyzer *a, ASTnode *node) {
                 if (!type) {
                         quil_error_at(STAGE_SEMANTIC, ERR_UNDECLARED_VAR, node->line, node->col, node->data.assign.name);
                 }
+                // element type for arr[i] = v (arrays are homogeneous, so var type == elem type)
+                node->resolved_type = strdup(type);
                 if (node->data.assign.index) {
                         sem_analyze_node(a, node->data.assign.index);
                 }

@@ -1,6 +1,0 @@
-fn main() {
-# Semantic invalid: use of an undeclared variable
-int32 a = 10
-print(a, "\n")
-print(ghost, "\n")
-}

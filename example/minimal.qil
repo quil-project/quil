@@ -1,0 +1,12 @@
+// minimal quil example — current syntax
+// build: ./bin/quil -o /tmp/minimal example/minimal.qil && /tmp/minimal; echo $?
+scope calc {
+ public fn add(int32 a, int32 b) -> int32 {
+  return a + b
+ }
+}
+public fn main() -> int32 {
+ int32[3] arr = [1, 2, 3]
+ int32 x = calc::add(arr[0], arr[2])
+ return x
+}

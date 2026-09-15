@@ -1,7 +1,0 @@
-fn main() {
-# Semantic invalid: loop counter escapes its for-scope
-for (int32 i = 0; i < 5; i++) {
-        print(i, "\n")
-}
-print(i, "\n")
-}

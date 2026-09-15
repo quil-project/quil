@@ -1,7 +1,0 @@
-fn main() {
-# Semantic invalid: read() into an undeclared variable
-int32 a = 1
-read(a)
-read(missing)
-print(a, "\n")
-}

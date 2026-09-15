@@ -33,7 +33,8 @@ char debug['Z' + 1];
 
 typedef struct {
         ILBuilder *ilb;
-        HashMap *slots; /* name -> Ref SLOT */
+        HashMap *slots;   /* name -> Ref* (alloc addr, Kl) */
+        HashMap *externs; /* mangled name -> present (extern prototypes) */
         IlModule *mod;
         char *cur_ns;         /* current namespace("scope" keyword) */
         Blk *break_target;    // current loop merge block
@@ -42,6 +43,9 @@ typedef struct {
 
 /* --- Prototypes --- */
 static int quil_to_cls(const char *t);
+static int elem_size_of(const char *t);
+static void emit_store_elem(Ssagen *s, const char *t, Ref v, Ref addr);
+static Ref emit_load_elem(Ssagen *s, const char *t, Ref addr);
 static Ref emit_expr(Ssagen *s, ASTnode *n);
 static void emit_stmt(Ssagen *s, ASTnode *n);
 static char *mangle(const char *qname);
@@ -64,6 +68,42 @@ static int quil_to_cls(const char *t) {
         if (!strcmp(t, "float32")) return Ks;
         if (!strcmp(t, "float64")) return Kd;
         return Kw;
+}
+// byte size of one element for contiguous array layout (Kw values still live in 32b regs)
+static int elem_size_of(const char *t) {
+        if (!t) return 4;
+        if (!strcmp(t, "int8") || !strcmp(t, "uint8") || !strcmp(t, "char") || !strcmp(t, "bool")) return 1;
+        if (!strcmp(t, "int16") || !strcmp(t, "uint16")) return 2;
+        if (!strcmp(t, "int32") || !strcmp(t, "uint32") || !strcmp(t, "float32")) return 4;
+        if (!strcmp(t, "int64") || !strcmp(t, "uint64") || !strcmp(t, "float64") || !strcmp(t, "string")) return 8;
+        if (t[strlen(t) - 1] == '*') return 8; // all pointers are l
+        return 4;
+}
+// store with memory width matching the element type (storeb/h for 1/2-byte elems)
+static void emit_store_elem(Ssagen *s, const char *t, Ref v, Ref addr) {
+        if (!t) t = "int32";
+        if (!strcmp(t, "int8") || !strcmp(t, "uint8") || !strcmp(t, "char") || !strcmp(t, "bool")) {
+                il_create_store_b(s->ilb, v, addr);
+                return;
+        }
+        if (!strcmp(t, "int16") || !strcmp(t, "uint16")) {
+                il_create_store_h(s->ilb, v, addr);
+                return;
+        }
+        il_create_store(s->ilb, quil_to_cls(t), v, addr);
+}
+// load with memory width matching the element type (unsigned uses zero-extend)
+static Ref emit_load_elem(Ssagen *s, const char *t, Ref addr) {
+        if (!t) t = "int32";
+        if (!strcmp(t, "int8") || !strcmp(t, "char")) return il_create_load_sb(s->ilb, addr);
+        if (!strcmp(t, "uint8") || !strcmp(t, "bool")) return il_create_load_ub(s->ilb, addr);
+        if (!strcmp(t, "int16")) return il_create_load_sh(s->ilb, addr);
+        if (!strcmp(t, "uint16")) return il_create_load_uh(s->ilb, addr);
+        int cls = quil_to_cls(t);
+        if (cls == Kl) return il_create_load_l(s->ilb, addr);
+        if (cls == Ks) return il_create_load_s(s->ilb, addr);
+        if (cls == Kd) return il_create_load_d(s->ilb, addr);
+        return il_create_load_w(s->ilb, addr);
 }
 static Ref emit_expr(Ssagen *s, ASTnode *n) {
         switch (n->type) {
@@ -112,21 +152,18 @@ static Ref emit_expr(Ssagen *s, ASTnode *n) {
         case NODE_ARRAY_ACCESS: { // arr[i] -> *(base + i * size)
                 bool found;
                 Ref *sp = hashmap_get(s->slots, n->data.array_access.name, &found);
+                if (!found) quil_error(STAGE_CODEGEN, ERR_UNDECLARED_VAR, n->data.array_access.name);
                 Ref base = *sp;
 
                 Ref idx = emit_expr(s, n->data.array_access.index);
                 int idx_cls = quil_to_cls(n->data.array_access.index->resolved_type);
-                int elem_cls = quil_to_cls(n->resolved_type);
-                int sz = (elem_cls == Kl || elem_cls == Kd) ? 8 : 4;
+                const char *et = n->resolved_type ? n->resolved_type : "int32";
+                int sz = elem_size_of(et);
                 Ref off = (idx_cls == Kl) ? il_create_mul_l(s->ilb, idx, il_const_int_l(s->ilb, sz))
                                           : il_create_mul_w(s->ilb, idx, il_const_int_w(s->ilb, sz));
                 Ref off_l = (idx_cls == Kl) ? off : il_create_extsw_l(s->ilb, off);
                 Ref addr = il_create_add_l(s->ilb, base, off_l); // Kl
-
-                if (elem_cls == Kl) return il_create_load_l(s->ilb, addr);
-                if (elem_cls == Ks) return il_create_load_s(s->ilb, addr);
-                if (elem_cls == Kd) return il_create_load_d(s->ilb, addr);
-                return il_create_load_w(s->ilb, addr);
+                return emit_load_elem(s, et, addr);
         }
         /* binray unary ternary expressions */
         case NODE_BINARY_EXPRESSION: {
@@ -234,6 +271,37 @@ static Ref emit_expr(Ssagen *s, ASTnode *n) {
                 if (cls == Ks) return il_create_phi_s(s->ilb, preds, vals, 2);
                 return il_create_phi_w(s->ilb, preds, vals, 2);
         }
+        case NODE_FUNC_CALL: {
+                int nargs = n->data.func_call.arg_count;
+                Ref *args = NULL;
+                if (nargs > 0) {
+                        args = emalloc(sizeof(Ref) * (size_t)nargs);
+                        for (int i = 0; i < nargs; i++) {
+                                args[i] = emit_expr(s, n->data.func_call.args[i]);
+                        }
+                }
+                char *mangled = mangle(n->data.func_call.name);
+                bool is_ext = false;
+                if (s->externs) {
+                        bool found = false;
+                        hashmap_get(s->externs, mangled, &found);
+                        is_ext = found;
+                }
+                Ref callee = is_ext ? il_extern_sym(s->ilb, mangled) : il_global_sym(s->ilb, mangled);
+                const char *rt = n->resolved_type;
+                bool is_void = (!rt || !strcmp(rt, "void"));
+                if (is_void) {
+                        for (int i = 0; i < nargs; i++) il_call_arg(s->ilb, args[i]);
+                        Ins ci = {.op = Ocall, .cls = Kw, .to = R, .arg = {callee, R}};
+                        addins(&s->ilb->cur->ins, &s->ilb->cur->nins, &ci);
+                        return CON_Z;
+                }
+                int cls = quil_to_cls(rt);
+                if (cls == Kl) return il_create_call_l(s->ilb, callee, args, nargs);
+                if (cls == Ks) return il_create_call_s(s->ilb, callee, args, nargs);
+                if (cls == Kd) return il_create_call_d(s->ilb, callee, args, nargs);
+                return il_create_call_w(s->ilb, callee, args, nargs);
+        }
         default:
                 quil_error(STAGE_CODEGEN, ERR_UNKNOWN, node_type_name(n->type));
         }
@@ -243,11 +311,7 @@ static void emit_stmt(Ssagen *s, ASTnode *n) {
         case NODE_VAR_DECL: {
                 int cls = quil_to_cls(n->data.var_decl.type_name);
                 const char *t = n->data.var_decl.type_name;
-                int elem_size = 4;
-                if (!strcmp(t, "int8") || !strcmp(t, "uint8") || !strcmp(t, "char") || !strcmp(t, "bool")) elem_size = 1;
-                else if (!strcmp(t, "int16") || !strcmp(t, "uint16")) elem_size = 2;
-                else if (!strcmp(t, "int32") || !strcmp(t, "uint32") || !strcmp(t, "float32")) elem_size = 4;
-                else if (!strcmp(t, "int64") || !strcmp(t, "uint64") || !strcmp(t, "float64") || !strcmp(t, "string")) elem_size = 8;
+                int elem_size = elem_size_of(t);
                 int sz = elem_size;
                 if (n->data.var_decl.is_array) sz *= n->data.var_decl.array_size;
                 else if (cls == Kl || cls == Kd) sz = 8; // scalar Kl/Kd still 8
@@ -257,8 +321,20 @@ static void emit_stmt(Ssagen *s, ASTnode *n) {
                 *rp = slot;
                 hashmap_put(s->slots, strdup(n->data.var_decl.name), rp);
                 if (n->data.var_decl.value) {
-                        Ref v = emit_expr(s, n->data.var_decl.value);
-                        il_create_store(s->ilb, cls, v, slot);
+                        // array init [1,2,3] -> store each element at base + i*elem_size
+                        if (n->data.var_decl.value->type == NODE_LIST_LITERAL) {
+                                ASTnode *lst = n->data.var_decl.value;
+                                for (int i = 0; i < lst->data.list_literal.count; i++) {
+                                        Ref ev = emit_expr(s, lst->data.list_literal.elements[i]);
+                                        Ref off = il_create_mul_w(s->ilb, il_const_int_w(s->ilb, i),
+                                                                                il_const_int_w(s->ilb, elem_size));
+                                        Ref addr = il_create_add_l(s->ilb, slot, il_create_extsw_l(s->ilb, off));
+                                        emit_store_elem(s, t, ev, addr);
+                                }
+                        } else {
+                                Ref v = emit_expr(s, n->data.var_decl.value);
+                                emit_store_elem(s, t, v, slot);
+                        }
                 }
                 break;
         }
@@ -271,13 +347,8 @@ static void emit_stmt(Ssagen *s, ASTnode *n) {
                 if (n->data.assign.index) {
                         Ref idx = emit_expr(s, n->data.assign.index);
                         int idx_cls = quil_to_cls(n->data.assign.index->resolved_type);
-                        int elem_cls = quil_to_cls(n->resolved_type);
                         const char *et = n->resolved_type ? n->resolved_type : "int32";
-                        int elem_size = 4;
-                        if (!strcmp(et, "int8") || !strcmp(et, "uint8") || !strcmp(et, "char") || !strcmp(et, "bool")) elem_size = 1;
-                        else if (!strcmp(et, "int16") || !strcmp(et, "uint16")) elem_size = 2;
-                        else if (!strcmp(et, "int32") || !strcmp(et, "uint32") || !strcmp(et, "float32")) elem_size = 4;
-                        else if (!strcmp(et, "int64") || !strcmp(et, "uint64") || !strcmp(et, "float64") || !strcmp(et, "string")) elem_size = 8;
+                        int elem_size = elem_size_of(et);
                         Ref off;
                         if (idx_cls == Kl) {
                                 off = il_create_mul_l(s->ilb, idx, il_const_int_l(s->ilb, elem_size));
@@ -286,7 +357,7 @@ static void emit_stmt(Ssagen *s, ASTnode *n) {
                         }
                         Ref off_l = (idx_cls == Kl) ? off : il_create_extsw_l(s->ilb, off);
                         Ref addr = il_create_add_l(s->ilb, slot, off_l);
-                        il_create_store(s->ilb, elem_cls, v, addr);
+                        emit_store_elem(s, et, v, addr);
                 } else {
                         int cls = quil_to_cls(n->resolved_type ? n->resolved_type : n->data.assign.value->resolved_type);
                         if (!cls) cls = quil_to_cls("int32");
@@ -459,6 +530,14 @@ static void emit_stmt(Ssagen *s, ASTnode *n) {
                 s->ilb->cur = NULL;
                 break;
         }
+        case NODE_FUNC_CALL: {
+                // expression-statement foo(); -> emit call, ignore result
+                emit_expr(s, n);
+                break;
+        }
+        case NODE_IMPORT:
+        case NODE_DIRECTIVE:
+                break;
         default:
                 break;
         }
@@ -499,15 +578,24 @@ static void emit_func(Ssagen *s, ASTnode *fndef) {
         Blk *entry = il_create_block(s->ilb, "entry");
         il_set_insert_point(s->ilb, entry); // ilbuilder.c:25 cur
 
-        for (int i = 0; i < fndef->data.func_def.param_count; i++) {
+        // params must all come first (filapi asserts Opar lead): collect first, then alloc/store
+        int pc = fndef->data.func_def.param_count;
+        Ref *prs = NULL;
+        if (pc > 0) {
+                prs = emalloc(sizeof(Ref) * (size_t)pc);
+                for (int i = 0; i < pc; i++) {
+                        ASTnode *p = fndef->data.func_def.params[i];
+                        prs[i] = il_add_param(s->ilb, quil_to_cls(p->data.var_decl.type_name));
+                }
+        }
+        for (int i = 0; i < pc; i++) {
                 ASTnode *p = fndef->data.func_def.params[i];
                 int cls = quil_to_cls(p->data.var_decl.type_name);
-                Ref pr = il_add_param(s->ilb, cls); // Kw/Kl
                 Ref slot = il_create_alloc4(s->ilb, il_const_int_w(s->ilb, 4));
                 Ref *rp = emalloc(sizeof(Ref));
                 *rp = slot;                                               // PHeap so survives freeall()
                 hashmap_put(s->slots, strdup(p->data.var_decl.name), rp); // slots name->Ref Kl
-                il_create_store(s->ilb, cls, pr, slot);                   // store param to slot
+                il_create_store(s->ilb, cls, prs[i], slot);               // store param to slot
         }
         // body BLOCK include/ast.h:191 -> emit_stmt() for each stmt
         for (int i = 0; i < fndef->data.func_def.body->data.blocks.count; i++) {
@@ -546,9 +634,34 @@ void ssagen_apply_options(const char *target, int level) {
         }
         quil_error(STAGE_FILE, ERR_INVALID_TARGET, target);
 }
+static void collect_externs(Ssagen *s, ASTnode *fndef) {
+        if (fndef->type != NODE_FUNC_DEF || !fndef->data.func_def.is_extern) return;
+        char *qname = s->cur_ns ? strf(PHeap, "%s::%s", s->cur_ns, fndef->data.func_def.name) : fndef->data.func_def.name;
+        char *mg = mangle(qname);
+        hashmap_put(s->externs, mg, (void *)1);
+}
 IlModule *ssagen_build(ASTnode *prog) {
         IlModule *mod = il_module_create();
-        Ssagen s = {.mod = mod, .slots = hashmap_create(hm_hash_str, hm_eq_str, NULL, NULL), .ilb = NULL};
+        Ssagen s = {.mod = mod,
+                    .slots = hashmap_create(hm_hash_str, hm_eq_str, NULL, NULL),
+                    .externs = hashmap_create(hm_hash_str, hm_eq_str, NULL, NULL),
+                    .ilb = NULL};
+
+        // first pass: collect extern prototypes (mangled) for SExt vs SGlo calls
+        for (int i = 0; i < prog->data.program.count; i++) {
+                ASTnode *stmt = prog->data.program.statements[i];
+                if (stmt->type == NODE_NAMESPACE) {
+                        char *old = s.cur_ns;
+                        s.cur_ns = old ? strf(PHeap, "%s::%s", old, stmt->data.namespace_decl.name) : strdup(stmt->data.namespace_decl.name);
+                        for (int j = 0; j < stmt->data.namespace_decl.body->data.blocks.count; j++) {
+                                collect_externs(&s, stmt->data.namespace_decl.body->data.blocks.statements[j]);
+                        }
+                        s.cur_ns = old;
+                } else if (stmt->type == NODE_FUNC_DEF) {
+                        collect_externs(&s, stmt);
+                }
+        }
+        s.cur_ns = NULL;
 
         for (int i = 0; i < prog->data.program.count; i++) {
                 ASTnode *stmt = prog->data.program.statements[i];
@@ -558,7 +671,8 @@ IlModule *ssagen_build(ASTnode *prog) {
 
                         // recurse into namespace_decl.body BLOCK include/ast.h:245 BLOCK
                         for (int j = 0; j < stmt->data.namespace_decl.body->data.blocks.count; j++) {
-                                emit_func(&s, stmt->data.namespace_decl.body->data.blocks.statements[j]);
+                                ASTnode *inner = stmt->data.namespace_decl.body->data.blocks.statements[j];
+                                if (inner->type == NODE_FUNC_DEF) emit_func(&s, inner);
                         }
                         s.cur_ns = old;
                 } else if (stmt->type == NODE_FUNC_DEF) {
@@ -567,6 +681,7 @@ IlModule *ssagen_build(ASTnode *prog) {
         }
 
         hashmap_free(s.slots);
+        hashmap_free(s.externs);
         return mod;
 }
 void ssagen_emit_asm(IlModule *mod, FILE *out) {

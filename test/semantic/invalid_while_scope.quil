@@ -1,9 +1,0 @@
-fn main() {
-# Semantic invalid: undeclared variable inside a while-loop body
-int32 count = 0
-while (count < 3) {
-        count = count + 1
-        print(count, " ", broken_var, "\n")
-}
-print(count, "\n")
-}

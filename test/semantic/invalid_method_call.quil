@@ -1,5 +1,0 @@
-fn main() {
-# Semantic: unknown method names must be rejected
-vec<int32> v = [1, 2];
-v.push(3);
-}

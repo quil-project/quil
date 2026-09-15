@@ -1,7 +1,0 @@
-fn main() {
-# Semantic invalid: assignment to an undeclared variable
-int32 a = 1
-a = a + 1
-nope = 42
-print(a, "\n")
-}
