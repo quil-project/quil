@@ -27,8 +27,12 @@ syntax keyword quilControl if else while for break continue return
 highlight link quilControl Statement
 
 " 3. Declarations
-syntax keyword quilDefine fn scope struct public extern import
+syntax keyword quilDefine fn import
 highlight link quilDefine Define
+
+" 3b. Scope/type modifiers (violet)
+syntax keyword quilDecl scope struct public extern
+highlight quilDecl guifg=#a78bfa ctermfg=141
 
 " 4. Function definitions and calls: 'fn name' and 'name('
 syntax match quilFuncDef "\(\<fn\>\s\+\)\@<=\w\+"
