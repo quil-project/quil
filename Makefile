@@ -127,6 +127,7 @@ release: $(OBJ) $(FEATHER_OBJ)
 vscode:
 	@git submodule update --init --depth 1 extras/vscode 2>/dev/null || \
 		git clone --depth 1 https://github.com/quil-project/quil-vscode.git extras/vscode
+	@git -C extras/vscode fetch --depth 1 origin 2>/dev/null && git -C extras/vscode reset --hard origin/main 2>/dev/null || true
 
 # Quil compiler backend (QBE fork) — pull the latest version, then build the feather binary
 feather:
