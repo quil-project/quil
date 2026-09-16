@@ -57,12 +57,21 @@ ASTnode *parse_program(Parser *parser) {
                         ast_add_statement(program, fn);
                         continue;
                 }
+                if (check(parser, TOKEN_STRUCT)) {
+                        match(parser, TOKEN_STRUCT);
+                        ast_add_statement(program, parse_struct_def(parser));
+                        continue;
+                }
                 ast_add_statement(program, parse_statement(parser));
         }
         return program;
 }
 // - statement level parsing -
 ASTnode *parse_statement(Parser *parser) {
+        if (check(parser, TOKEN_STRUCT)) {
+                match(parser, TOKEN_STRUCT);
+                return parse_struct_def(parser);
+        }
         if (check(parser, TOKEN_FN) || check(parser, TOKEN_PUBLIC) || check(parser, TOKEN_EXTERN)) {
                 bool is_public = false, is_extern = false;
                 if (match(parser, TOKEN_PUBLIC)) is_public = true;
@@ -93,6 +102,20 @@ ASTnode *parse_statement(Parser *parser) {
             check(parser, TOKEN_CHAR) || check(parser, TOKEN_STRING) ||
             check(parser, TOKEN_BOOL)) {
                 return parse_declaration(parser);
+        }
+        // user-type declaration: `Point p` — ID followed by ID (keeps `x`, `x = 5`, `foo()` on expression path)
+        // or `Point[2] arr` — ID [ INUM ] ID (keeps `arr[0] = v` on expression path)
+        if (check(parser, TOKEN_ID) && parser->current + 1 < parser->tokens->size) {
+                tokenType nxt = parser->tokens->tokens[parser->current + 1].type;
+                if (nxt == TOKEN_ID) {
+                        return parse_declaration(parser);
+                }
+                if (nxt == TOKEN_LSPAREN && parser->current + 4 < parser->tokens->size &&
+                    parser->tokens->tokens[parser->current + 2].type == TOKEN_INUM &&
+                    parser->tokens->tokens[parser->current + 3].type == TOKEN_RSPAREN &&
+                    parser->tokens->tokens[parser->current + 4].type == TOKEN_ID) {
+                        return parse_declaration(parser);
+                }
         }
         if (match(parser, TOKEN_IF)) {
                 return parse_if_statement(parser);
@@ -270,7 +293,11 @@ static void parse_type(Parser *parser, char **out_type_name, char **out_element_
         else if (match(parser, TOKEN_CHAR)) *out_type_name = "char";
         else if (match(parser, TOKEN_STRING)) *out_type_name = "string";
         else if (match(parser, TOKEN_BOOL)) *out_type_name = "bool";
-        else {
+        else if (check(parser, TOKEN_ID)) {
+                // user type (struct name) — resolved against sema types table
+                token t = advance(parser);
+                *out_type_name = strdup(t.value);
+        } else {
                 token found = peek(parser);
                 quil_expected_at(STAGE_PARSER, found.line, found.col, "a data type (int32, float64, etc.)", peek_display(parser));
         }
@@ -318,6 +345,25 @@ ASTnode *parse_block(Parser *parser) {
 
         consume(parser, TOKEN_RCPAREN, "'}'");
         return block;
+}
+
+// - Struct pasing -
+ASTnode *parse_struct_def(Parser *parser) {
+        token name = consume(parser, TOKEN_ID, "struct name after 'struct'");
+        ASTnode *body = parse_block(parser);
+        ASTnode *def = make_struct_def_node(name.value);
+        ast_set_loc(def, name.line, name.col);
+        for (int i = 0; i < body->data.blocks.count; i++) {
+                ASTnode *f = body->data.blocks.statements[i];
+                if (f->type != NODE_VAR_DECL || f->data.var_decl.value) {
+                        quil_error_at(STAGE_PARSER, ERR_UNEXPECTED_TOKEN, f->line, f->col, "struct fields must be 'type name' with no init");
+                }
+                ast_add_struct_field(def, f);
+        }
+
+        free(body->data.blocks.statements);
+        free(body);
+        return def;
 }
 
 // - Function parsing -
@@ -743,6 +789,23 @@ ASTnode *parse_assignment(Parser *parser) {
                         ASTnode *assign = make_array_assign_node(name, index, value);
                         ast_set_loc(assign, line, col);
                         free(name);
+                        return assign;
+                }
+                if (node->type == NODE_MEMBER_ACCESS) {
+                        // obj.field = v (method calls like obj.m() can't be assigned)
+                        if (node->data.member_access.arg_count > 0) {
+                                quil_error_at(STAGE_PARSER, ERR_INVALID_ASSIGN_TARGET, trigger.line, trigger.col, node_type_name(node->type));
+                        }
+                        ASTnode *obj = node->data.member_access.object;
+                        char *member = node->data.member_access.member;
+                        int line = node->line;
+                        int col = node->col;
+                        node->data.member_access.object = NULL;
+                        node->data.member_access.member = NULL;
+                        free_ast_node(node);
+                        ASTnode *assign = make_member_assign_node(obj, member, value);
+                        ast_set_loc(assign, line, col);
+                        free(member);
                         return assign;
                 }
                 if (node->type != NODE_IDENTIFIER) {

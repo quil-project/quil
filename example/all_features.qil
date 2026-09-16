@@ -1,0 +1,85 @@
+// every quil feature in one file (exit code is the checksum: expect 74)
+// NOTE: needs the feather il_module_emit patch (T.emitfin) for the float64 const pool.
+// build: ./bin/quil -o /tmp/all example/all_features.qil && /tmp/all; echo $?
+
+// ---- struct + nested struct ----
+struct Point {
+ int32 x
+ int32 y
+}
+struct Pair {
+ int32 a
+ Point p
+}
+
+// ---- scope + qualified calls ----
+scope calc {
+ public fn add(int32 a, int32 b) -> int32 {
+  return a + b
+ }
+ public fn muladd(int32 a, int32 b, int32 c) -> int32 {
+  return a * b + c
+ }
+}
+
+// ---- extern C ----
+extern fn puts(string s) -> int32
+
+// ---- struct param (by address) ----
+public fn sumpt(Point p) -> int32 {
+ return p.x + p.y
+}
+
+public fn main() -> int32 {
+ int32 s = 0
+ // arithmetic + ternary + unary + comparison + logical
+ int32 x = 2 + 3 * 4
+ int32 t = x > 10 ? 1 : 0
+ int32 n = -t
+ s = s + x + t + n + 1
+ // struct var, field write/read, struct arg
+ Point p
+ p.x = 5
+ p.y = 6
+ s = s + sumpt(p)
+ // nested struct
+ Pair q
+ q.a = 1
+ q.p.x = 2
+ q.p.y = 3
+ s = s + q.a + q.p.x + q.p.y
+ // scope calls
+ s = calc::add(s, 4)
+ s = calc::muladd(2, 3, s)
+ // arrays: init, index write/read
+ int32[4] arr = [1, 2, 3, 4]
+ arr[0] = 10
+ s = s + arr[0] + arr[3]
+ // range for + classic for
+ for (3) {
+  s = s + 1
+ }
+ for (int32 i = 0; i < 4; i = i + 1) {
+  s = s + i
+ }
+ // while + break + continue
+ int32 i = 0
+ while (i < 10) {
+  i = i + 1
+  if (i == 2) {
+   continue
+  }
+  if (i == 5) {
+   break
+  }
+  s = s + i
+ }
+ // other literals + extern call (float literals are float64, like C doubles)
+ float64 f = 1.5 + 2.5
+ bool b = x > 2 && true
+ char c = 'A'
+ string greeting = "hi"
+ s = s + b + c - 65
+ puts(greeting)
+ return s
+}

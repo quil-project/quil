@@ -660,6 +660,12 @@ token lexer_tokenize_words(FILE *buffer) {
                 } else {
                         tokens.type = TOKEN_EXTERN;
                 }
+        } else if (strcmp(char_buffer, "struct") == 0) {
+                if (SQUOTE_MODE || DQUOTE_MODE) {
+                        tokens.type = TOKEN_QSTRING;
+                } else {
+                        tokens.type = TOKEN_STRUCT;
+                }
         } else if (strcmp(char_buffer, "long") == 0) {
                 tokens.type = TOKEN_ID;
         } else if (strcmp(char_buffer, "short") == 0) {
@@ -870,6 +876,8 @@ const char *lexer_token_type_to_string(tokenType type) {
                 return "TOKEN_PUBLIC";
         case TOKEN_EXTERN:
                 return "TOKEN_EXTERN";
+        case TOKEN_STRUCT:
+                return "TOKEN_STRUCT";
         case TOKEN_TRUE:
                 return "TOKEN_TRUE";
         case TOKEN_FALSE:

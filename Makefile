@@ -13,7 +13,7 @@ CC ?= cc
 RCFLAGS += -Wall -Wextra -O2    # cflags for release make
 DCFLAGS += -Wall -Wextra -g -O2 # cflags for default make
 FEATHER_CFLAGS = -std=c99 -Wall -Wextra -Wpedantic -g -O2
-SRC = src/main.c src/cli.c src/lexer.c src/lexer_filter.c src/parser.c src/methods.c \
+SRC = src/main.c src/cli.c src/lexer.c src/lexer_filter.c src/parser.c \
       src/ast.c src/helper.c src/error.c src/_hashmap.c src/sema.c src/ssagen.c
 VERSION = $(shell cat VERSION)
 BUILDDIR = build
@@ -29,16 +29,17 @@ FEATHER_OPT_SRC    = feather/src/opt/fold.c feather/src/opt/gvn.c feather/src/op
                      feather/src/opt/simpl.c feather/src/opt/ifopt.c
 FEATHER_REG_SRC    = feather/src/reg/live.c feather/src/reg/spill.c feather/src/reg/rega.c
 FEATHER_EMIT_SRC   = feather/src/emit/emit.c feather/src/emit/abi.c
-FEATHER_AMD64_SRC  = feather/amd64/targ.c feather/amd64/sysv.c feather/amd64/isel.c \
-                     feather/amd64/emit.c feather/amd64/winabi.c
-FEATHER_ARM64_SRC  = feather/arm64/targ.c feather/arm64/abi.c feather/arm64/isel.c \
-                     feather/arm64/emit.c
-FEATHER_RV64_SRC   = feather/rv64/targ.c feather/rv64/abi.c feather/rv64/isel.c \
-                     feather/rv64/emit.c
+FEATHER_AMD64_SRC  = feather/arch/amd64/targ.c feather/arch/amd64/sysv.c feather/arch/amd64/isel.c \
+                     feather/arch/amd64/emit.c feather/arch/amd64/winabi.c
+FEATHER_ARM64_SRC  = feather/arch/arm64/targ.c feather/arch/arm64/abi.c feather/arch/arm64/isel.c \
+                     feather/arch/arm64/emit.c
+FEATHER_RV64_SRC   = feather/arch/rv64/targ.c feather/arch/rv64/abi.c feather/arch/rv64/isel.c \
+                     feather/arch/rv64/emit.c
 FEATHER_FILAPI_SRC = feather/filapi/src/ilbuilder.c feather/filapi/src/data.c \
                      feather/filapi/src/module.c feather/filapi/src/type.c
 
 # Include all feather sources (core lib, without feather/main.c)
+# NOTE: no rv32 here — arch/rv32 has no .c files yet, wire it when targ.c lands
 FEATHER_SRC = $(FEATHER_UTIL_SRC) $(FEATHER_CORE_SRC) $(FEATHER_OPT_SRC) \
               $(FEATHER_REG_SRC) $(FEATHER_EMIT_SRC) \
               $(FEATHER_AMD64_SRC) $(FEATHER_ARM64_SRC) $(FEATHER_RV64_SRC) \
@@ -77,9 +78,9 @@ $(FEATHER_EMIT_SRC:%.c=$(BUILDDIR)/%.o): feather/all.h feather/ops.h \
 $(FEATHER_FILAPI_SRC:%.c=$(BUILDDIR)/%.o): feather/filapi/include/ilbuilder.h \
 	feather/filapi/include/data.h feather/filapi/include/module.h \
 	feather/filapi/include/type.h feather/all.h feather/src/ops.h feather/config.h
-$(FEATHER_AMD64_SRC:%.c=$(BUILDDIR)/%.o): feather/amd64/all.h
-$(FEATHER_ARM64_SRC:%.c=$(BUILDDIR)/%.o): feather/arm64/all.h
-$(FEATHER_RV64_SRC:%.c=$(BUILDDIR)/%.o): feather/rv64/all.h
+$(FEATHER_AMD64_SRC:%.c=$(BUILDDIR)/%.o): feather/arch/amd64/all.h
+$(FEATHER_ARM64_SRC:%.c=$(BUILDDIR)/%.o): feather/arch/arm64/all.h
+$(FEATHER_RV64_SRC:%.c=$(BUILDDIR)/%.o): feather/arch/rv64/all.h
 
 # feather/config.h picks the default target for the host (mirrors feather/Makefile)
 feather/config.h:

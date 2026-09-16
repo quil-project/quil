@@ -40,6 +40,7 @@ ASTnode *parse_block(Parser *parser);
 // Function parsing
 ASTnode *parse_func_def(Parser *parser);
 ASTnode *parse_func_def_param(Parser *parser);
+ASTnode *parse_struct_def(Parser *parser);
 // Expression parsing
 ASTnode *parse_primary(Parser *parser);
 ASTnode *parse_call(Parser *parser);        // for functions calls like func(parameters) and member access like arr[0]

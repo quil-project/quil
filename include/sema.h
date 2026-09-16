@@ -19,10 +19,21 @@
 typedef struct {
         HashMap **frames;      // stack of symbol tables
         HashMap *functions;    // table for function type and name
+        HashMap *types;        // qualified struct name -> StructDef*
         size_t frame_count;    // number of scopes currently open
         size_t frame_capacity; // allocated slots
         char *cur_ns;          // current namespace/scope
 } SemAnalyzer;
+
+// aggregate type layout (offsets mirror feather addm() padding)
+typedef struct {
+        char **field_names;
+        char **field_types; // resolved (qualified) type names
+        int *field_offsets;
+        int field_count;
+        int size;
+        int align; // log2 alignment
+} StructDef;
 
 // function signatures
 typedef struct {

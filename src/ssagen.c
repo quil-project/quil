@@ -32,9 +32,18 @@ int optlevel = 0; // no optimization by default
 char debug['Z' + 1];
 
 typedef struct {
+        char **field_names;
+        int *field_offsets;
+        int field_count;
+        int size;
+        int align; // log2 alignment
+} SsaStruct;
+
+typedef struct {
         ILBuilder *ilb;
-        HashMap *slots;   /* name -> Ref* (alloc addr, Kl) */
-        HashMap *externs; /* mangled name -> present (extern prototypes) */
+        HashMap *slots;        /* name -> Ref* (alloc addr, Kl) */
+        HashMap *externs;      /* mangled name -> present (extern prototypes) */
+        HashMap *struct_types; /* qualified name -> SsaStruct* (first-pass layouts) */
         IlModule *mod;
         char *cur_ns;         /* current namespace("scope" keyword) */
         Blk *break_target;    // current loop merge block
@@ -46,6 +55,9 @@ static int quil_to_cls(const char *t);
 static int elem_size_of(const char *t);
 static void emit_store_elem(Ssagen *s, const char *t, Ref v, Ref addr);
 static Ref emit_load_elem(Ssagen *s, const char *t, Ref addr);
+static Ref emit_obj_addr(Ssagen *s, ASTnode *obj);
+static int ssa_align_of(Ssagen *s, const char *t);
+static int ssa_type_size(Ssagen *s, const char *t);
 static Ref emit_expr(Ssagen *s, ASTnode *n);
 static void emit_stmt(Ssagen *s, ASTnode *n);
 static char *mangle(const char *qname);
@@ -61,8 +73,8 @@ static int quil_to_cls(const char *t) {
                 return Kw;
         }
         if (!strcmp(t, "int64") || !strcmp(t, "uint64") || !strcmp(t, "string") ||
-            !strcmp(t, "char*")) {
-                return Kl; // pointers are l
+            !strcmp(t, "char*") || !strcmp(t, "char *")) {
+                return Kl; // pointers are l (sema spells it "char *" with a space)
         }
         if (!strcmp(t, "char")) return Kw; // char literal is w (byte promoted)
         if (!strcmp(t, "float32")) return Ks;
@@ -104,6 +116,135 @@ static Ref emit_load_elem(Ssagen *s, const char *t, Ref addr) {
         if (cls == Ks) return il_create_load_s(s->ilb, addr);
         if (cls == Kd) return il_create_load_d(s->ilb, addr);
         return il_create_load_w(s->ilb, addr);
+}
+static void ssa_struct_free(void *p) {
+        SsaStruct *sd = (SsaStruct *)p;
+        if (!sd) return;
+        for (int i = 0; i < sd->field_count; i++) free(sd->field_names[i]);
+        free(sd->field_names);
+        free(sd->field_offsets);
+        free(sd);
+}
+
+// qualified name of a struct def (malloc'd, caller frees or hands to table)
+static char *ssa_struct_qname(Ssagen *s, const char *name) {
+        if (!s->cur_ns) return strdup(name);
+        size_t len = strlen(s->cur_ns) + 2 + strlen(name) + 1;
+        char *q = malloc(len);
+        snprintf(q, len, "%s::%s", s->cur_ns, name);
+        return q;
+}
+
+// log2 alignment for layout (b=0 h=1 w/s=2 l/d=3, structs from table)
+static int ssa_align_of(Ssagen *s, const char *t) {
+        if (!strcmp(t, "int8") || !strcmp(t, "uint8") || !strcmp(t, "char") || !strcmp(t, "bool")) return 0;
+        if (!strcmp(t, "int16") || !strcmp(t, "uint16")) return 1;
+        if (!strcmp(t, "int32") || !strcmp(t, "uint32") || !strcmp(t, "float32")) return 2;
+        if (!strcmp(t, "int64") || !strcmp(t, "uint64") || !strcmp(t, "float64") || !strcmp(t, "string")) return 3;
+        if (t[strlen(t) - 1] == '*') return 3;
+        bool found = false;
+        SsaStruct *sd = hashmap_get(s->struct_types, t, &found);
+        if (!found && s->cur_ns) {
+                size_t len = strlen(s->cur_ns) + 2 + strlen(t) + 1;
+                char *q = malloc(len);
+                snprintf(q, len, "%s::%s", s->cur_ns, t);
+                sd = hashmap_get(s->struct_types, q, &found);
+                free(q);
+        }
+        if (found) return sd->align;
+        return 2;
+}
+
+// true when t names a registered struct (raw or cur_ns-qualified)
+static bool ssa_is_struct(Ssagen *s, const char *t) {
+        if (!t) return false;
+        bool found = false;
+        hashmap_get(s->struct_types, t, &found);
+        if (!found && s->cur_ns) {
+                size_t len = strlen(s->cur_ns) + 2 + strlen(t) + 1;
+                char *q = malloc(len);
+                snprintf(q, len, "%s::%s", s->cur_ns, t);
+                hashmap_get(s->struct_types, q, &found);
+                free(q);
+        }
+        return found;
+}
+
+// total byte size of a type (arrays handled by caller via elem_size_of * count)
+static int ssa_type_size(Ssagen *s, const char *t) {
+        // structs first: a struct with max align w (e.g. Point) must not hit the primitive fast path
+        bool found = false;
+        SsaStruct *sd = hashmap_get(s->struct_types, t, &found);
+        if (!found && s->cur_ns) {
+                size_t len = strlen(s->cur_ns) + 2 + strlen(t) + 1;
+                char *q = malloc(len);
+                snprintf(q, len, "%s::%s", s->cur_ns, t);
+                sd = hashmap_get(s->struct_types, q, &found);
+                free(q);
+        }
+        if (found) return sd->size;
+        int al = ssa_align_of(s, t);
+        if (al == 0) return 1;
+        if (al == 1) return 2;
+        if (al == 2) return 4;
+        return 8; // Kl/Kd classes
+}
+
+// first pass: register struct layouts (same addm padding as sema)
+static void collect_struct(Ssagen *s, ASTnode *def) {
+        SsaStruct *sd = malloc(sizeof(SsaStruct));
+        int n = def->data.struct_def.field_count;
+        sd->field_names = malloc(sizeof(char *) * (size_t)(n > 0 ? n : 1));
+        sd->field_offsets = malloc(sizeof(int) * (size_t)(n > 0 ? n : 1));
+        sd->field_count = n;
+        int off = 0, maxal = 0;
+        for (int i = 0; i < n; i++) {
+                ASTnode *f = def->data.struct_def.fields[i];
+                int al = ssa_align_of(s, f->data.var_decl.type_name);
+                int sz = ssa_type_size(s, f->data.var_decl.type_name);
+                if (f->data.var_decl.is_array) sz *= f->data.var_decl.array_size;
+                if (al > maxal) maxal = al;
+                int am = (1 << al) - 1;
+                off = ((off + am) & ~am);
+                sd->field_names[i] = strdup(f->data.var_decl.name);
+                sd->field_offsets[i] = off;
+                off += sz;
+        }
+        sd->size = ((off + (1 << maxal) - 1) & ~((1 << maxal) - 1));
+        sd->align = maxal;
+        hashmap_put(s->struct_types, ssa_struct_qname(s, def->data.struct_def.name), sd);
+}
+
+// address of an lvalue object: identifier -> slot, arr[i] -> base + i*size,
+// member -> parent base + field offset
+static Ref emit_obj_addr(Ssagen *s, ASTnode *obj) {
+        if (obj->type == NODE_IDENTIFIER) {
+                bool found;
+                Ref *slotp = hashmap_get(s->slots, obj->data.identifier.name, &found);
+                if (!found) quil_error(STAGE_CODEGEN, ERR_UNDECLARED_VAR, obj->data.identifier.name);
+                return *slotp;
+        }
+        if (obj->type == NODE_ARRAY_ACCESS) {
+                bool found;
+                Ref *sp = hashmap_get(s->slots, obj->data.array_access.name, &found);
+                if (!found) quil_error(STAGE_CODEGEN, ERR_UNDECLARED_VAR, obj->data.array_access.name);
+                Ref base = *sp;
+                Ref idx = emit_expr(s, obj->data.array_access.index);
+                int idx_cls = quil_to_cls(obj->data.array_access.index->resolved_type);
+                int sz = ssa_type_size(s, obj->resolved_type ? obj->resolved_type : "int32");
+                Ref off = (idx_cls == Kl) ? il_create_mul_l(s->ilb, idx, il_const_int_l(s->ilb, sz))
+                                          : il_create_mul_w(s->ilb, idx, il_const_int_w(s->ilb, sz));
+                Ref off_l = (idx_cls == Kl) ? off : il_create_extsw_l(s->ilb, off);
+                return il_create_add_l(s->ilb, base, off_l);
+        }
+        if (obj->type == NODE_MEMBER_ACCESS) {
+                Ref base = emit_obj_addr(s, obj->data.member_access.object);
+                int off = obj->data.member_access.field_offset;
+                if (off < 0) quil_error(STAGE_CODEGEN, ERR_UNKNOWN, obj->data.member_access.member);
+                if (off == 0) return base;
+                return il_create_add_l(s->ilb, base, il_const_int_l(s->ilb, off));
+        }
+        quil_error(STAGE_CODEGEN, ERR_UNKNOWN, node_type_name(obj->type));
 }
 static Ref emit_expr(Ssagen *s, ASTnode *n) {
         switch (n->type) {
@@ -271,13 +412,29 @@ static Ref emit_expr(Ssagen *s, ASTnode *n) {
                 if (cls == Ks) return il_create_phi_s(s->ilb, preds, vals, 2);
                 return il_create_phi_w(s->ilb, preds, vals, 2);
         }
+        case NODE_MEMBER_ACCESS: { // obj.field read (struct only; methods rejected in sema)
+                if (n->data.member_access.arg_count > 0) {
+                        quil_error(STAGE_CODEGEN, ERR_UNKNOWN, n->data.member_access.member);
+                }
+                Ref base = emit_obj_addr(s, n->data.member_access.object);
+                int off = n->data.member_access.field_offset;
+                if (off < 0) quil_error(STAGE_CODEGEN, ERR_UNKNOWN, n->data.member_access.member);
+                Ref addr = (off == 0) ? base : il_create_add_l(s->ilb, base, il_const_int_l(s->ilb, off));
+                return emit_load_elem(s, n->resolved_type, addr);
+        }
         case NODE_FUNC_CALL: {
                 int nargs = n->data.func_call.arg_count;
                 Ref *args = NULL;
                 if (nargs > 0) {
                         args = emalloc(sizeof(Ref) * (size_t)nargs);
                         for (int i = 0; i < nargs; i++) {
-                                args[i] = emit_expr(s, n->data.func_call.args[i]);
+                                ASTnode *a = n->data.func_call.args[i];
+                                // struct args pass by address (no struct-by-value yet)
+                                if (a->resolved_type && ssa_is_struct(s, a->resolved_type)) {
+                                        args[i] = emit_obj_addr(s, a);
+                                } else {
+                                        args[i] = emit_expr(s, a);
+                                }
                         }
                 }
                 char *mangled = mangle(n->data.func_call.name);
@@ -309,12 +466,12 @@ static Ref emit_expr(Ssagen *s, ASTnode *n) {
 static void emit_stmt(Ssagen *s, ASTnode *n) {
         switch (n->type) {
         case NODE_VAR_DECL: {
-                int cls = quil_to_cls(n->data.var_decl.type_name);
                 const char *t = n->data.var_decl.type_name;
-                int elem_size = elem_size_of(t);
-                int sz = elem_size;
+                int cls = quil_to_cls(t);
+                // ssa_type_size covers primitives + structs (elem_size_of falls back to 4 for structs)
+                int sz = ssa_type_size(s, t);
+                if (sz != 1 && sz != 2 && sz != 4 && sz != 8) cls = Kl; // struct value: address-sized slot
                 if (n->data.var_decl.is_array) sz *= n->data.var_decl.array_size;
-                else if (cls == Kl || cls == Kd) sz = 8; // scalar Kl/Kd still 8
 
                 Ref slot = il_create_alloc4(s->ilb, il_const_int_w(s->ilb, sz)); // always l
                 Ref *rp = emalloc(sizeof(Ref));
@@ -324,10 +481,11 @@ static void emit_stmt(Ssagen *s, ASTnode *n) {
                         // array init [1,2,3] -> store each element at base + i*elem_size
                         if (n->data.var_decl.value->type == NODE_LIST_LITERAL) {
                                 ASTnode *lst = n->data.var_decl.value;
+                                int esz = ssa_type_size(s, t);
                                 for (int i = 0; i < lst->data.list_literal.count; i++) {
                                         Ref ev = emit_expr(s, lst->data.list_literal.elements[i]);
                                         Ref off = il_create_mul_w(s->ilb, il_const_int_w(s->ilb, i),
-                                                                                il_const_int_w(s->ilb, elem_size));
+                                                                                il_const_int_w(s->ilb, esz));
                                         Ref addr = il_create_add_l(s->ilb, slot, il_create_extsw_l(s->ilb, off));
                                         emit_store_elem(s, t, ev, addr);
                                 }
@@ -339,6 +497,16 @@ static void emit_stmt(Ssagen *s, ASTnode *n) {
                 break;
         }
         case NODE_ASSIGN: {
+                if (n->data.assign.is_member) {
+                        // obj.field = v
+                        Ref v = emit_expr(s, n->data.assign.value);
+                        Ref base = emit_obj_addr(s, n->data.assign.obj);
+                        int off = n->data.assign.field_offset;
+                        if (off < 0) quil_error(STAGE_CODEGEN, ERR_UNKNOWN, n->data.assign.member);
+                        Ref addr = (off == 0) ? base : il_create_add_l(s->ilb, base, il_const_int_l(s->ilb, off));
+                        emit_store_elem(s, n->resolved_type, v, addr);
+                        break;
+                }
                 bool found;
                 Ref *sp = hashmap_get(s->slots, n->data.assign.name, &found);
                 if (!found) quil_error(STAGE_CODEGEN, ERR_UNDECLARED_VAR, n->data.assign.name);
@@ -579,23 +747,33 @@ static void emit_func(Ssagen *s, ASTnode *fndef) {
         il_set_insert_point(s->ilb, entry); // ilbuilder.c:25 cur
 
         // params must all come first (filapi asserts Opar lead): collect first, then alloc/store
+        // struct params arrive by address (caller passes slot addr, see FUNC_CALL)
         int pc = fndef->data.func_def.param_count;
         Ref *prs = NULL;
         if (pc > 0) {
                 prs = emalloc(sizeof(Ref) * (size_t)pc);
                 for (int i = 0; i < pc; i++) {
                         ASTnode *p = fndef->data.func_def.params[i];
-                        prs[i] = il_add_param(s->ilb, quil_to_cls(p->data.var_decl.type_name));
+                        bool ps = ssa_is_struct(s, p->data.var_decl.type_name);
+                        prs[i] = il_add_param(s->ilb, ps ? Kl : quil_to_cls(p->data.var_decl.type_name));
                 }
         }
         for (int i = 0; i < pc; i++) {
                 ASTnode *p = fndef->data.func_def.params[i];
+                if (ssa_is_struct(s, p->data.var_decl.type_name)) {
+                        Ref *rp = emalloc(sizeof(Ref));
+                        *rp = prs[i]; // address directly, no copy
+                        hashmap_put(s->slots, strdup(p->data.var_decl.name), rp);
+                        continue;
+                }
                 int cls = quil_to_cls(p->data.var_decl.type_name);
-                Ref slot = il_create_alloc4(s->ilb, il_const_int_w(s->ilb, 4));
+                int psz = ssa_type_size(s, p->data.var_decl.type_name);
+                Ref slot = il_create_alloc4(s->ilb, il_const_int_w(s->ilb, psz));
                 Ref *rp = emalloc(sizeof(Ref));
                 *rp = slot;                                               // PHeap so survives freeall()
                 hashmap_put(s->slots, strdup(p->data.var_decl.name), rp); // slots name->Ref Kl
-                il_create_store(s->ilb, cls, prs[i], slot);               // store param to slot
+                if (psz == 1 || psz == 2) emit_store_elem(s, p->data.var_decl.type_name, prs[i], slot);
+                else il_create_store(s->ilb, cls, prs[i], slot);          // store param to slot
         }
         // body BLOCK include/ast.h:191 -> emit_stmt() for each stmt
         for (int i = 0; i < fndef->data.func_def.body->data.blocks.count; i++) {
@@ -640,23 +818,41 @@ static void collect_externs(Ssagen *s, ASTnode *fndef) {
         char *mg = mangle(qname);
         hashmap_put(s->externs, mg, (void *)1);
 }
+// recursive namespace walk (handles nested scope blocks); pass 0 = collect, 1 = emit
+static void walk_ns(Ssagen *s, ASTnode *blk, int pass) {
+        for (int j = 0; j < blk->data.blocks.count; j++) {
+                ASTnode *inner = blk->data.blocks.statements[j];
+                if (inner->type == NODE_NAMESPACE) {
+                        char *old = s->cur_ns;
+                        s->cur_ns = old ? strf(PHeap, "%s::%s", old, inner->data.namespace_decl.name) : strdup(inner->data.namespace_decl.name);
+                        walk_ns(s, inner->data.namespace_decl.body, pass);
+                        s->cur_ns = old;
+                } else if (pass == 0) {
+                        if (inner->type == NODE_STRUCT_DEF) collect_struct(s, inner);
+                        else collect_externs(s, inner);
+                } else if (inner->type == NODE_FUNC_DEF) {
+                        emit_func(s, inner);
+                }
+        }
+}
 IlModule *ssagen_build(ASTnode *prog) {
         IlModule *mod = il_module_create();
         Ssagen s = {.mod = mod,
                     .slots = hashmap_create(hm_hash_str, hm_eq_str, NULL, NULL),
                     .externs = hashmap_create(hm_hash_str, hm_eq_str, NULL, NULL),
+                    .struct_types = hashmap_create(hm_hash_str, hm_eq_str, free, ssa_struct_free),
                     .ilb = NULL};
 
-        // first pass: collect extern prototypes (mangled) for SExt vs SGlo calls
+        // first pass: struct layouts + extern prototypes (mangled) for SExt vs SGlo calls
         for (int i = 0; i < prog->data.program.count; i++) {
                 ASTnode *stmt = prog->data.program.statements[i];
                 if (stmt->type == NODE_NAMESPACE) {
                         char *old = s.cur_ns;
                         s.cur_ns = old ? strf(PHeap, "%s::%s", old, stmt->data.namespace_decl.name) : strdup(stmt->data.namespace_decl.name);
-                        for (int j = 0; j < stmt->data.namespace_decl.body->data.blocks.count; j++) {
-                                collect_externs(&s, stmt->data.namespace_decl.body->data.blocks.statements[j]);
-                        }
+                        walk_ns(&s, stmt->data.namespace_decl.body, 0);
                         s.cur_ns = old;
+                } else if (stmt->type == NODE_STRUCT_DEF) {
+                        collect_struct(&s, stmt);
                 } else if (stmt->type == NODE_FUNC_DEF) {
                         collect_externs(&s, stmt);
                 }
@@ -668,12 +864,7 @@ IlModule *ssagen_build(ASTnode *prog) {
                 if (stmt->type == NODE_NAMESPACE) { // "scope" is referred as namespace
                         char *old = s.cur_ns;
                         s.cur_ns = old ? strf(PHeap, "%s::%s", old, stmt->data.namespace_decl.name) : strdup(stmt->data.namespace_decl.name);
-
-                        // recurse into namespace_decl.body BLOCK include/ast.h:245 BLOCK
-                        for (int j = 0; j < stmt->data.namespace_decl.body->data.blocks.count; j++) {
-                                ASTnode *inner = stmt->data.namespace_decl.body->data.blocks.statements[j];
-                                if (inner->type == NODE_FUNC_DEF) emit_func(&s, inner);
-                        }
+                        walk_ns(&s, stmt->data.namespace_decl.body, 1);
                         s.cur_ns = old;
                 } else if (stmt->type == NODE_FUNC_DEF) {
                         emit_func(&s, stmt);
@@ -682,6 +873,7 @@ IlModule *ssagen_build(ASTnode *prog) {
 
         hashmap_free(s.slots);
         hashmap_free(s.externs);
+        hashmap_free(s.struct_types);
         return mod;
 }
 void ssagen_emit_asm(IlModule *mod, FILE *out) {

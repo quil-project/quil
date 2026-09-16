@@ -12,7 +12,6 @@
 
 #include "../include/sema.h"
 #include "../include/error.h"
-#include "../include/methods.h"
 #include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -77,6 +76,90 @@ static char *sem_fulltype(const char *type_name, const char *modifiers, const ch
         return out;
 }
 
+// free StructDef
+static void structdef_free(void *p) {
+        StructDef *sd = (StructDef *)p;
+        if (!sd) {
+                return;
+        }
+        for (int i = 0; i < sd->field_count; i++) {
+                free(sd->field_names[i]);
+                free(sd->field_types[i]);
+        }
+        free(sd->field_names);
+        free(sd->field_types);
+        free(sd->field_offsets);
+        free(sd);
+}
+
+// true for the 12 primitive type names (parse_type() in src/parser.c)
+static bool sem_is_primitive(const char *t) {
+        return !strcmp(t, "int8") || !strcmp(t, "int16") || !strcmp(t, "int32") ||
+               !strcmp(t, "int64") || !strcmp(t, "uint8") || !strcmp(t, "uint16") ||
+               !strcmp(t, "uint32") || !strcmp(t, "uint64") || !strcmp(t, "float32") ||
+               !strcmp(t, "float64") || !strcmp(t, "char") || !strcmp(t, "string") ||
+               !strcmp(t, "bool");
+}
+
+// byte size of a type (primitives + pointers + registered structs)
+static int sem_size_of(SemAnalyzer *a, const char *t) {
+        if (!strcmp(t, "int8") || !strcmp(t, "uint8") || !strcmp(t, "char") || !strcmp(t, "bool")) return 1;
+        if (!strcmp(t, "int16") || !strcmp(t, "uint16")) return 2;
+        if (!strcmp(t, "int32") || !strcmp(t, "uint32") || !strcmp(t, "float32")) return 4;
+        if (!strcmp(t, "int64") || !strcmp(t, "uint64") || !strcmp(t, "float64") || !strcmp(t, "string")) return 8;
+        if (t[strlen(t) - 1] == '*') return 8; // all pointers are l
+        bool found = false;
+        StructDef *sd = hashmap_get(a->types, t, &found);
+        if (found) return sd->size;
+        return 0; // unknown
+}
+
+// log2 alignment (matches feather addm(): b=0 h=1 w/s=2 l/d=3)
+static int sem_align_of(SemAnalyzer *a, const char *t) {
+        if (!strcmp(t, "int8") || !strcmp(t, "uint8") || !strcmp(t, "char") || !strcmp(t, "bool")) return 0;
+        if (!strcmp(t, "int16") || !strcmp(t, "uint16")) return 1;
+        if (!strcmp(t, "int32") || !strcmp(t, "uint32") || !strcmp(t, "float32")) return 2;
+        if (!strcmp(t, "int64") || !strcmp(t, "uint64") || !strcmp(t, "float64") || !strcmp(t, "string")) return 3;
+        if (t[strlen(t) - 1] == '*') return 3;
+        bool found = false;
+        StructDef *sd = hashmap_get(a->types, t, &found);
+        if (found) return sd->align;
+        return 2;
+}
+
+// look up a struct field: returns field type or NULL, sets *out_off when found
+static const char *sem_struct_field(SemAnalyzer *a, const char *struct_type, const char *member, int *out_off) {
+        if (!struct_type) return NULL;
+        bool found = false;
+        StructDef *sd = hashmap_get(a->types, struct_type, &found);
+        if (!found) return NULL;
+        for (int i = 0; i < sd->field_count; i++) {
+                if (!strcmp(sd->field_names[i], member)) {
+                        if (out_off) *out_off = sd->field_offsets[i];
+                        return sd->field_types[i];
+                }
+        }
+        return NULL;
+}
+
+// resolve a written type to its qualified table name (cur_ns::T preferred, then T)
+static char *sem_resolve_type(SemAnalyzer *a, const char *t) {
+        if (sem_is_primitive(t) || t[strlen(t) - 1] == '*') return strdup(t);
+        if (a->cur_ns) {
+                size_t len = strlen(a->cur_ns) + 2 + strlen(t) + 1;
+                char *q = malloc(len);
+                snprintf(q, len, "%s::%s", a->cur_ns, t);
+                bool found = false;
+                hashmap_get(a->types, q, &found);
+                if (found) return q;
+                free(q);
+        }
+        bool found = false;
+        hashmap_get(a->types, t, &found);
+        if (found) return strdup(t);
+        return NULL; // unknown
+}
+
 // free funcSig struct
 static void funcSig_free(void *p) {
         funcSig *fs = (funcSig *)p;
@@ -100,11 +183,11 @@ static void sem_analyze_node(SemAnalyzer *a, ASTnode *node) {
                 sem_push_scope(a);
                 for (int i = 0; i < node->data.program.count; i++) {
                         ASTnode *stmt = node->data.program.statements[i];
-                        // file scope may only hold declarations/directives/namespaces;
+                        // file scope may only hold declarations/directives/namespaces/structs;
                         // executables must live inside 'fn main()'
                         if (stmt->type != NODE_FUNC_DEF && stmt->type != NODE_VAR_DECL &&
                             stmt->type != NODE_IMPORT && stmt->type != NODE_DIRECTIVE &&
-                            stmt->type != NODE_NAMESPACE) {
+                            stmt->type != NODE_NAMESPACE && stmt->type != NODE_STRUCT_DEF) {
                                 quil_error_at(STAGE_SEMANTIC, ERR_TOP_LEVEL_STMT, stmt->line, stmt->col, NULL);
                         }
                         sem_analyze_node(a, stmt);
@@ -119,12 +202,12 @@ static void sem_analyze_node(SemAnalyzer *a, ASTnode *node) {
                 sem_pop_scope(a);
                 break;
 
-        // ---- Literals (nothing to check) ----
-        case NODE_INT_LITERAL: break;
-        case NODE_FLOAT_LITERAL: break;
-        case NODE_STRING_LITERAL: break;
-        case NODE_BOOL_LITERAL: break;
-        case NODE_CHAR_LITERAL: break;
+        // ---- Literals (intrinsic types: float literals are float64 like C doubles) ----
+        case NODE_INT_LITERAL: node->resolved_type = strdup("int32"); break;
+        case NODE_FLOAT_LITERAL: node->resolved_type = strdup("float64"); break;
+        case NODE_STRING_LITERAL: node->resolved_type = strdup("char *"); break;
+        case NODE_BOOL_LITERAL: node->resolved_type = strdup("bool"); break;
+        case NODE_CHAR_LITERAL: node->resolved_type = strdup("char"); break;
         case NODE_LIST_LITERAL: {
                 for (int i = 0; i < node->data.list_literal.count; i++) {
                         sem_analyze_node(a, node->data.list_literal.elements[i]);
@@ -153,11 +236,28 @@ static void sem_analyze_node(SemAnalyzer *a, ASTnode *node) {
         case NODE_MEMBER_ACCESS: {
                 sem_analyze_node(a, node->data.member_access.object);
                 const char *obj_type = node->data.member_access.object->resolved_type;
-                if (node->data.member_access.arg_count > 0) {
-                        // method call: validate the method against the shared table
-                        if (!obj_type || !method_lookup(obj_type, node->data.member_access.member)) {
-                                quil_error_at(STAGE_SEMANTIC, ERR_UNKNOWN, node->line, node->col, node->data.member_access.member);
+                if (node->data.member_access.arg_count == 0 && obj_type) {
+                        // struct field read: look up the field type + offset
+                        int off = -1;
+                        const char *ft = sem_struct_field(a, obj_type, node->data.member_access.member, &off);
+                        if (ft) {
+                                node->resolved_type = strdup(ft);
+                                node->data.member_access.field_offset = off;
+                                break;
                         }
+                        // struct type but unknown field
+                        if (obj_type) {
+                                bool is_struct = false;
+                                hashmap_get(a->types, obj_type, &is_struct);
+                                if (is_struct) {
+                                        quil_error_at(STAGE_SEMANTIC, ERR_UNKNOWN, node->line, node->col, node->data.member_access.member);
+                                }
+                        }
+                }
+                if (node->data.member_access.arg_count > 0) {
+                        // no method system (vec methods removed with vec); method calls are rejected
+                        // until methods return as stdlib functions
+                        quil_error_at(STAGE_SEMANTIC, ERR_UNKNOWN, node->line, node->col, node->data.member_access.member);
                 }
                 for (int i = 0; i < node->data.member_access.arg_count; i++) {
                         sem_analyze_node(a, node->data.member_access.args[i]);
@@ -168,22 +268,57 @@ static void sem_analyze_node(SemAnalyzer *a, ASTnode *node) {
         }
 
         // ---- Expressions (binary / unary / ternary) ----
-        case NODE_BINARY_EXPRESSION:
+        case NODE_BINARY_EXPRESSION: {
                 sem_analyze_node(a, node->data.binary_expression.left);
                 sem_analyze_node(a, node->data.binary_expression.right);
+                tokenType bop = node->data.binary_expression.op;
+                // comparisons and logicals produce bool (Kw)
+                if (bop == TOKEN_EEQUAL || bop == TOKEN_NEQUAL || bop == TOKEN_LABRACKET ||
+                    bop == TOKEN_RABRACKET || bop == TOKEN_LEQUAL || bop == TOKEN_GEQUAL ||
+                    bop == TOKEN_AND || bop == TOKEN_OR) {
+                        node->resolved_type = strdup("bool");
+                        break;
+                }
+                // arithmetic: promote float64 > float32 > int64/uint64 > left type
+                const char *lt = node->data.binary_expression.left->resolved_type;
+                const char *rt = node->data.binary_expression.right->resolved_type;
+                if ((lt && !strcmp(lt, "float64")) || (rt && !strcmp(rt, "float64"))) node->resolved_type = strdup("float64");
+                else if ((lt && !strcmp(lt, "float32")) || (rt && !strcmp(rt, "float32"))) node->resolved_type = strdup("float32");
+                else if ((lt && (!strcmp(lt, "int64") || !strcmp(lt, "uint64"))) ||
+                         (rt && (!strcmp(rt, "int64") || !strcmp(rt, "uint64")))) {
+                        node->resolved_type = strdup(lt && (!strcmp(lt, "int64") || !strcmp(lt, "uint64")) ? lt : rt);
+                } else node->resolved_type = strdup(lt ? lt : "int32");
                 break;
-        case NODE_UNARY_EXPRESSION:
+        }
+        case NODE_UNARY_EXPRESSION: {
                 sem_analyze_node(a, node->data.unary_expression.left);
+                // !a -> bool, -a -> operand type
+                if (node->data.unary_expression.op == TOKEN_EXCLAMATION) node->resolved_type = strdup("bool");
+                else {
+                        const char *ut = node->data.unary_expression.left->resolved_type;
+                        node->resolved_type = strdup(ut ? ut : "int32");
+                }
                 break;
-        case NODE_TERNARY_EXPRESSION:
+        }
+        case NODE_TERNARY_EXPRESSION: {
                 sem_analyze_node(a, node->data.ternary_expression.condition);
                 sem_analyze_node(a, node->data.ternary_expression.then_expr);
                 sem_analyze_node(a, node->data.ternary_expression.else_expr);
+                // result type follows the then-branch (mirrors old codegen_specifier)
+                const char *tt = node->data.ternary_expression.then_expr->resolved_type;
+                node->resolved_type = strdup(tt ? tt : "int32");
                 break;
+        }
 
         // ---- Declarations & assignment ----
         case NODE_VAR_DECL: {
-                char *type = sem_fulltype(node->data.var_decl.type_name, node->data.var_decl.modifiers, NULL);
+                // struct types resolve to their qualified table name (cur_ns::T preferred)
+                char *rtype = sem_resolve_type(a, node->data.var_decl.type_name);
+                if (!rtype) {
+                        quil_error_at(STAGE_SEMANTIC, ERR_UNDECLARED_TYPE, node->line, node->col, node->data.var_decl.type_name);
+                }
+                char *type = sem_fulltype(rtype, node->data.var_decl.modifiers, NULL);
+                free(rtype);
                 sem_declare(a, node->data.var_decl.name, type, node->line, node->col);
                 free(type); // sem_declare strdup'd it so we can free this copy
                 if (node->data.var_decl.value) {
@@ -192,6 +327,20 @@ static void sem_analyze_node(SemAnalyzer *a, ASTnode *node) {
                 break;
         }
         case NODE_ASSIGN: {
+                if (node->data.assign.is_member) {
+                        // obj.field = v: analyze object, resolve field type + offset
+                        sem_analyze_node(a, node->data.assign.obj);
+                        const char *obj_type = node->data.assign.obj->resolved_type;
+                        int off = -1;
+                        const char *ft = sem_struct_field(a, obj_type, node->data.assign.member, &off);
+                        if (!ft) {
+                                quil_error_at(STAGE_SEMANTIC, ERR_UNKNOWN, node->line, node->col, node->data.assign.member);
+                        }
+                        node->resolved_type = strdup(ft);
+                        node->data.assign.field_offset = off;
+                        sem_analyze_node(a, node->data.assign.value);
+                        break;
+                }
                 const char *type = sem_resolve(a, node->data.assign.name);
                 if (!type) {
                         quil_error_at(STAGE_SEMANTIC, ERR_UNDECLARED_VAR, node->line, node->col, node->data.assign.name);
@@ -242,7 +391,18 @@ static void sem_analyze_node(SemAnalyzer *a, ASTnode *node) {
         // ---- Functions ----
         case NODE_FUNC_DEF: {
                 funcSig *fs = malloc(sizeof(funcSig));
-                fs->return_type = node->data.func_def.return_type ? strdup(node->data.func_def.return_type) : strdup("void");
+                // resolve struct return types to qualified names (primitives pass through)
+                if (!node->data.func_def.return_type || !strcmp(node->data.func_def.return_type, "void")) {
+                        fs->return_type = strdup("void");
+                } else {
+                        char *rrt = sem_resolve_type(a, node->data.func_def.return_type);
+                        if (!rrt) {
+                                free(fs);
+                                quil_error_at(STAGE_SEMANTIC, ERR_UNDECLARED_TYPE, node->line, node->col, node->data.func_def.return_type);
+                        }
+                        fs->return_type = sem_fulltype(rrt, NULL, NULL);
+                        free(rrt);
+                }
                 fs->param_count = node->data.func_def.param_count;
                 fs->param_types = NULL;
                 fs->is_public = node->data.func_def.is_public;
@@ -252,8 +412,17 @@ static void sem_analyze_node(SemAnalyzer *a, ASTnode *node) {
                         fs->param_types = malloc(sizeof(char *) * fs->param_count);
                         for (int i = 0; i < (int)fs->param_count; i++) {
                                 ASTnode *p = node->data.func_def.params[i];
+                                char *prt = sem_resolve_type(a, p->data.var_decl.type_name);
+                                if (!prt) {
+                                        for (int j = 0; j < i; j++) free(fs->param_types[j]);
+                                        free(fs->param_types);
+                                        free(fs->return_type);
+                                        free(fs);
+                                        quil_error_at(STAGE_SEMANTIC, ERR_UNDECLARED_TYPE, p->line, p->col, p->data.var_decl.type_name);
+                                }
                                 // sem_fulltype returns a freshly-allocated string
-                                fs->param_types[i] = sem_fulltype(p->data.var_decl.type_name, p->data.var_decl.modifiers, NULL);
+                                fs->param_types[i] = sem_fulltype(prt, p->data.var_decl.modifiers, NULL);
+                                free(prt);
                         }
                 }
 
@@ -294,6 +463,9 @@ static void sem_analyze_node(SemAnalyzer *a, ASTnode *node) {
                 break;
         }
         case NODE_FUNC_CALL: {
+                for (int i = 0; i < node->data.func_call.arg_count; i++) {
+                        sem_analyze_node(a, node->data.func_call.args[i]);
+                }
                 bool found = false;
                 funcSig *fs = hashmap_get(a->functions, node->data.func_call.name, &found);
                 if (found) {
@@ -339,6 +511,59 @@ static void sem_analyze_node(SemAnalyzer *a, ASTnode *node) {
                 // codegen/sema will resolve qualified calls via NODE_FUNC_CALL name "a::b"
                 break;
 
+        // ---- Struct definition ----
+        case NODE_STRUCT_DEF: {
+                // qualified name like functions: scope std { struct Point } -> std::Point
+                char *qname;
+                if (a->cur_ns) {
+                        size_t len = strlen(a->cur_ns) + 2 + strlen(node->data.struct_def.name) + 1;
+                        qname = malloc(len);
+                        snprintf(qname, len, "%s::%s", a->cur_ns, node->data.struct_def.name);
+                } else {
+                        qname = strdup(node->data.struct_def.name);
+                }
+                StructDef *sd = calloc(1, sizeof(StructDef));
+                if (!hashmap_insert(a->types, qname, sd)) {
+                        structdef_free(sd);
+                        free(qname);
+                        quil_error_at(STAGE_SEMANTIC, ERR_DUPLICATED_TYPE, node->line, node->col, node->data.struct_def.name);
+                }
+                // layout fields with feather addm() padding: align b=1 h=2 w/s=4 l/d=8
+                int off = 0, maxal = 0, n = node->data.struct_def.field_count;
+                sd->field_names = malloc(sizeof(char *) * (size_t)(n > 0 ? n : 1));
+                sd->field_types = malloc(sizeof(char *) * (size_t)(n > 0 ? n : 1));
+                sd->field_offsets = malloc(sizeof(int) * (size_t)(n > 0 ? n : 1));
+                for (int i = 0; i < n; i++) {
+                        ASTnode *f = node->data.struct_def.fields[i];
+                        const char *fname = f->data.var_decl.name;
+                        for (int j = 0; j < i; j++) {
+                                if (!strcmp(sd->field_names[j], fname)) {
+                                        quil_error_at(STAGE_SEMANTIC, ERR_REDECLARED_VAR, f->line, f->col, fname);
+                                }
+                        }
+                        char *ft = sem_resolve_type(a, f->data.var_decl.type_name);
+                        if (!ft) {
+                                quil_error_at(STAGE_SEMANTIC, ERR_UNDECLARED_TYPE, f->line, f->col, f->data.var_decl.type_name);
+                        }
+                        int al = sem_align_of(a, ft);
+                        int sz = sem_size_of(a, ft);
+                        if (f->data.var_decl.is_array) {
+                                sz *= f->data.var_decl.array_size; // arrays: N contiguous elems, elem align
+                        }
+                        if (al > maxal) maxal = al;
+                        int am = (1 << al) - 1;
+                        off = ((off + am) & ~am);
+                        sd->field_names[i] = strdup(fname);
+                        sd->field_types[i] = ft; // already malloc'd
+                        sd->field_offsets[i] = off;
+                        off += sz;
+                }
+                sd->field_count = n;
+                sd->size = ((off + (1 << maxal) - 1) & ~((1 << maxal) - 1));
+                sd->align = maxal;
+                break;
+        }
+
         default:
                 break;
         }
@@ -348,6 +573,7 @@ static void sem_analyze_node(SemAnalyzer *a, ASTnode *node) {
 void semantic_analyze(ASTnode *program) {
         SemAnalyzer a = {0};
         a.functions = hashmap_create(hm_hash_str, hm_eq_str, free, funcSig_free);
+        a.types = hashmap_create(hm_hash_str, hm_eq_str, free, structdef_free);
         sem_analyze_node(&a, program);
 
         // check for fn main() - must be public fn main()
@@ -361,5 +587,6 @@ void semantic_analyze(ASTnode *program) {
         }
 
         hashmap_free(a.functions);
+        hashmap_free(a.types);
         free(a.frames);
 }

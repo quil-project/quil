@@ -102,6 +102,8 @@ const char *node_type_name(nodeType type) {
                 return "namespace";
         case NODE_QUALIFIED:
                 return "qualified path";
+        case NODE_STRUCT_DEF:
+                return "struct definition";
         default:
                 return "expression";
         }
@@ -194,6 +196,10 @@ ASTnode *make_assign_node(char *name, ASTnode *value) {
         ASTnode *node = create_ast_node(NODE_ASSIGN);
         node->data.assign.name = strdup(name);
         node->data.assign.value = value;
+        node->data.assign.is_member = false;
+        node->data.assign.obj = NULL;
+        node->data.assign.member = NULL;
+        node->data.assign.field_offset = 0;
         return node;
 }
 ASTnode *make_array_assign_node(char *name, ASTnode *index, ASTnode *value) {
@@ -201,6 +207,20 @@ ASTnode *make_array_assign_node(char *name, ASTnode *index, ASTnode *value) {
         node->data.assign.name = strdup(name);
         node->data.assign.index = index;
         node->data.assign.value = value;
+        node->data.assign.is_member = false;
+        node->data.assign.obj = NULL;
+        node->data.assign.member = NULL;
+        node->data.assign.field_offset = 0;
+        return node;
+}
+ASTnode *make_member_assign_node(ASTnode *obj, char *member, ASTnode *value) {
+        ASTnode *node = create_ast_node(NODE_ASSIGN);
+        node->data.assign.name = NULL;
+        node->data.assign.value = value;
+        node->data.assign.is_member = true;
+        node->data.assign.obj = obj;
+        node->data.assign.member = strdup(member);
+        node->data.assign.field_offset = -1; // resolved by sema
         return node;
 }
 ASTnode *make_func_call_node(char *name, ASTnode **args, int arg_count) {
@@ -240,6 +260,7 @@ ASTnode *make_member_access_node(ASTnode *object, char *member, ASTnode **args, 
         node->data.member_access.member = strdup(member);
         node->data.member_access.args = args;
         node->data.member_access.arg_count = arg_count;
+        node->data.member_access.field_offset = -1; // resolved by sema for struct reads
         return node;
 }
 ASTnode *make_namespace_node(char *name, ASTnode *body) {
@@ -253,6 +274,25 @@ ASTnode *make_qualified_node(char **segments, int count) {
         node->data.qualified.segments = segments;
         node->data.qualified.count = count;
         return node;
+}
+ASTnode *make_struct_def_node(char *name) {
+        ASTnode *node = create_ast_node(NODE_STRUCT_DEF);
+        node->data.struct_def.name = strdup(name);
+        node->data.struct_def.fields = NULL;
+        node->data.struct_def.field_count = 0;
+        node->data.struct_def.field_capacity = 0;
+        return node;
+}
+void ast_add_struct_field(ASTnode *struct_def, ASTnode *field) {
+        if (struct_def->type != NODE_STRUCT_DEF) {
+                return;
+        }
+        if (struct_def->data.struct_def.field_count >= struct_def->data.struct_def.field_capacity) {
+                struct_def->data.struct_def.field_capacity = struct_def->data.struct_def.field_capacity == 0 ? 4 : struct_def->data.struct_def.field_capacity * 2;
+                struct_def->data.struct_def.fields = (ASTnode **)realloc(struct_def->data.struct_def.fields,
+                                                                          sizeof(ASTnode *) * (size_t)struct_def->data.struct_def.field_capacity);
+        }
+        struct_def->data.struct_def.fields[struct_def->data.struct_def.field_count++] = field;
 }
 
 /*
@@ -357,6 +397,10 @@ void free_ast_node(ASTnode *node) {
         case NODE_ASSIGN:
                 free(node->data.assign.name);
                 if (node->data.assign.index) free_ast_node(node->data.assign.index);
+                if (node->data.assign.is_member) {
+                        free_ast_node(node->data.assign.obj);
+                        free(node->data.assign.member);
+                }
                 free_ast_node(node->data.assign.value);
                 break;
         case NODE_FUNC_CALL:
@@ -453,6 +497,13 @@ void free_ast_node(ASTnode *node) {
                 for (int i = 0; i < node->data.qualified.count; i++) free(node->data.qualified.segments[i]);
                 free(node->data.qualified.segments);
                 break;
+        case NODE_STRUCT_DEF:
+                free(node->data.struct_def.name);
+                for (int i = 0; i < node->data.struct_def.field_count; i++) {
+                        free_ast_node(node->data.struct_def.fields[i]);
+                }
+                free(node->data.struct_def.fields);
+                break;
         default:
                 break;
         }
@@ -499,8 +550,13 @@ void print_ast(ASTnode *node, int level) {
                 }
                 break;
         case NODE_ASSIGN:
-                printf("ASSIGN: %s\n", node->data.assign.name);
-                if (node->data.assign.index) print_ast(node->data.assign.index, level + 1);
+                if (node->data.assign.is_member) {
+                        printf("ASSIGN-MEMBER: %s\n", node->data.assign.member);
+                        print_ast(node->data.assign.obj, level + 1);
+                } else {
+                        printf("ASSIGN: %s\n", node->data.assign.name);
+                        if (node->data.assign.index) print_ast(node->data.assign.index, level + 1);
+                }
                 print_ast(node->data.assign.value, level + 1);
                 break;
         case NODE_MEMBER_ACCESS:
@@ -593,6 +649,12 @@ void print_ast(ASTnode *node, int level) {
                         printf("%s", node->data.qualified.segments[i]);
                 }
                 printf("\n");
+                break;
+        case NODE_STRUCT_DEF:
+                printf("STRUCT: %s [%d fields]\n", node->data.struct_def.name, node->data.struct_def.field_count);
+                for (int i = 0; i < node->data.struct_def.field_count; i++) {
+                        print_ast(node->data.struct_def.fields[i], level + 1);
+                }
                 break;
         default:
                 printf("NODE_TYPE: %d\n", node->type);

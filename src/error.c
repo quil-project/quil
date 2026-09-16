@@ -137,6 +137,9 @@ static void print_error_message(ErrorStage stage, ErrorCode code, int line, int 
         case ERR_UNDECLARED_VAR:
                 fprintf(stderr, "use of undeclared variable '%s'", d);
                 break;
+        case ERR_UNDECLARED_TYPE:
+                fprintf(stderr, "use of undeclared type '%s'", d);
+                break;
         case ERR_REDECLARED_VAR:
                 fprintf(stderr, "variable '%s' already declared in this scope", d);
                 break;
@@ -148,6 +151,9 @@ static void print_error_message(ErrorStage stage, ErrorCode code, int line, int 
                 break;
         case ERR_DUPLICATED_FUNC:
                 fprintf(stderr, "function '%s' is already defined", d);
+                break;
+        case ERR_DUPLICATED_TYPE:
+                fprintf(stderr, "struct '%s' is already defined", d);
                 break;
         case ERR_NO_MAIN:
                 fprintf(stderr, "no 'fn main()' entry point defined");

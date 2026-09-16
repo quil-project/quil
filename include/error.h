@@ -47,10 +47,12 @@ typedef enum {
 
         // Semantic analysis errors
         ERR_UNDECLARED_VAR,  // used a variable that was never declared
+        ERR_UNDECLARED_TYPE, // used a type that was never declared
         ERR_REDECLARED_VAR,  // declared a variable already in scope
         ERR_UNDECLARED_FUNC, // called a function that was never declared
         ERR_ARG_COUNT,       // function called with wrong number of args
         ERR_DUPLICATED_FUNC, // function name defined more than once
+        ERR_DUPLICATED_TYPE, // struct name defined more than once
         ERR_NO_MAIN,         // program has no 'fn main()' entry point
         ERR_MAIN_NOT_PUBLIC, // main must be public
         ERR_TOP_LEVEL_STMT,  // statement at file scope that isn't a declaration

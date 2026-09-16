@@ -40,6 +40,7 @@ typedef enum {
         TOKEN_SCOPE,    // keyword scope, defines a namespace/scope block
         TOKEN_PUBLIC,   // keyword public, marks fn as exported
         TOKEN_EXTERN,   // keyword extern, declares fn without body (prototype)
+        TOKEN_STRUCT,   // keyword struct, defines an aggregate type
         // Data types
         TOKEN_BOOL,    // boolean data type
         TOKEN_INT8,    // 8-bit signed integer

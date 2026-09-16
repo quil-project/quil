@@ -1,0 +1,48 @@
+// struct demo — current syntax
+// build: ./bin/quil -o /tmp/struct example/struct.qil && /tmp/struct; echo $?
+// NOTE: the Mixed section needs the feather loadopt patch (see below) to assemble.
+struct Point {
+ int32 x
+ int32 y
+}
+struct Inner {
+ int32 v
+}
+struct Outer {
+ int32 tag
+ Inner inner
+}
+// padding demo: int8(1) + pad(7) + int64(8) + int16(2) + pad(6) = 24 bytes
+struct Mixed {
+ int8 a
+ int64 b
+ int16 c
+}
+// struct params pass by address
+public fn addpt(Point p) -> int32 {
+ return p.x + p.y
+}
+public fn main() -> int32 {
+ // plain struct var + field write/read
+ Point p
+ p.x = 10
+ p.y = 20
+ int32 s = addpt(p)
+ // nested struct
+ Outer o
+ o.tag = 1
+ o.inner.v = 2
+ s = s + o.tag + o.inner.v
+ // array of structs
+ Point[2] arr
+ arr[0].x = 1
+ arr[1].y = 2
+ s = s + arr[0].x + arr[1].y
+ // padded struct with narrow fields
+ Mixed m
+ m.a = 1
+ m.b = 2
+ m.c = 3
+ s = s + m.a + m.c
+ return s
+}
