@@ -10,6 +10,8 @@
 
 #include "../include/lexer.h"
 #include "../include/mode.h"
+#include <limits.h>
+#include <stdint.h>
 #include <stdlib.h>
 
 // quote mode, will be true if we encounter TOKEN_SQUOTE or TOKEN_DQUOTE for first time;
@@ -801,7 +803,15 @@ token lexer_tokenize_numbers(FILE *buffer) {
                 return tokens;
         } else {
                 tokens.type = TOKEN_INUM;
-                tokens.int_value = atoi(char_buffer);
+                // use 64-bit conversion to avoid truncation of large literals (e.g. uint64 max)
+                tokens.int_value = (int64_t)strtoll(char_buffer, NULL, 10);
+                // fallback to unsigned interpretation if strtoll overflows (value > INT64_MAX)
+                // strtoull preserves bit pattern for 18446744073709551615
+                if (tokens.int_value == INT64_MAX || tokens.int_value == INT64_MIN) {
+                        // re-parse as unsigned to get full 64-bit range, cast preserves bits
+                        unsigned long long uv = strtoull(char_buffer, NULL, 10);
+                        tokens.int_value = (int64_t)uv;
+                }
                 free(char_buffer);
                 return tokens;
         }
@@ -993,7 +1003,7 @@ const char *lexer_token_type_to_string(tokenType type) {
 void lexer_print_token(token t) {
         printf("%-20s: ", lexer_token_type_to_string(t.type));
         if (t.type == TOKEN_INUM) {
-                printf("%d\n", t.int_value);
+                printf("%lld\n", (long long)t.int_value);
         } else if (t.type == TOKEN_FNUM) {
                 printf("%f\n", t.float_value);
         } else if (t.value) {

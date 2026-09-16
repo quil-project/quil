@@ -14,6 +14,7 @@
 #include "error.h"
 #include "lexer.h"
 #include <stdbool.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -145,7 +146,7 @@ struct ASTnode {
 
                 // NODE_INT_LITERAL
                 struct {
-                        int value;
+                        int64_t value;
                 } int_literal;
 
                 // NODE_FLOAT_LITERAL
@@ -261,7 +262,7 @@ struct ASTnode {
 // Creates a basic node with a specific type. Node initialization.
 ASTnode *create_ast_node(nodeType type);
 // specalized factory function for value assignition
-ASTnode *make_int_node(int value);
+ASTnode *make_int_node(int64_t value);
 ASTnode *make_float_node(double value);
 ASTnode *make_string_node(char *value);
 ASTnode *make_bool_node(bool value);

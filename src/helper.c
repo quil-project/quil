@@ -102,7 +102,7 @@ const char *peek_display(Parser *parser) {
         static char buf[64];
         switch (t.type) {
         case TOKEN_INUM:
-                snprintf(buf, sizeof(buf), "%d", t.int_value);
+                snprintf(buf, sizeof(buf), "%lld", (long long)t.int_value);
                 break;
         case TOKEN_FNUM:
                 snprintf(buf, sizeof(buf), "%g", t.float_value);

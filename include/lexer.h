@@ -14,6 +14,7 @@
 #include <ctype.h>
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -118,7 +119,7 @@ typedef enum {
 typedef struct {
         tokenType type;
         char *value;        // stores the token as string
-        int int_value;      // stores the token as intager value
+        int64_t int_value;  // stores the token as intager value (64-bit to avoid truncation)
         double float_value; // stores the token as float value
         int line;           // 1-based line of the token's first character
         int col;            // 1-based column of the token's first character

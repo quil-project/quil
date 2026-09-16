@@ -111,7 +111,7 @@ const char *node_type_name(nodeType type) {
 
 // --- Specialized Factory Functions ---
 // These functions wrap create_ast_node and populate the type-specific union data.
-ASTnode *make_int_node(int value) {
+ASTnode *make_int_node(int64_t value) {
         ASTnode *node = create_ast_node(NODE_INT_LITERAL);
         node->data.int_literal.value = value;
         return node;
@@ -568,7 +568,7 @@ void print_ast(ASTnode *node, int level) {
                 }
                 break;
         case NODE_INT_LITERAL:
-                printf("INT: %d\n", node->data.int_literal.value);
+                printf("INT: %lld\n", (long long)node->data.int_literal.value);
                 break;
         case NODE_FLOAT_LITERAL:
                 printf("FLOAT: %f\n", node->data.float_literal.value);

@@ -235,7 +235,7 @@ static void print_error_message(ErrorStage stage, ErrorCode code, int line, int 
                 break;
         case ERR_UNKNOWN:
         default:
-                fprintf(stderr, "an unknown error occurred");
+                fprintf(stderr, "%s", d);
                 break;
         }
 }

@@ -12,7 +12,9 @@
 
 #include "../include/sema.h"
 #include "../include/error.h"
+#include <limits.h>
 #include <stddef.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -203,7 +205,18 @@ static void sem_analyze_node(SemAnalyzer *a, ASTnode *node) {
                 break;
 
         // ---- Literals (intrinsic types: float literals are float64 like C doubles) ----
-        case NODE_INT_LITERAL: node->resolved_type = strdup("int32"); break;
+        case NODE_INT_LITERAL: {
+                int64_t v = node->data.int_literal.value;
+                // infer smallest signed/unsigned type that fits the literal
+                // uint64 max = 18446744073709551615 (bits all 1 -> v == -1 as int64_t)
+                // heuristic: if value already fits int32, keep int32; otherwise promote to int64/uint64
+                // treat bit pattern as unsigned for range check
+                uint64_t uv = (uint64_t)v;
+                if (v >= INT32_MIN && v <= INT32_MAX) node->resolved_type = strdup("int32");
+                else if (v >= 0 && uv <= (uint64_t)INT64_MAX) node->resolved_type = strdup("int64");
+                else node->resolved_type = strdup("uint64");
+                break;
+        }
         case NODE_FLOAT_LITERAL: node->resolved_type = strdup("float64"); break;
         case NODE_STRING_LITERAL: node->resolved_type = strdup("char *"); break;
         case NODE_BOOL_LITERAL: node->resolved_type = strdup("bool"); break;

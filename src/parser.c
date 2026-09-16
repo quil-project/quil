@@ -67,6 +67,14 @@ ASTnode *parse_program(Parser *parser) {
         return program;
 }
 // - statement level parsing -
+// a path segment: plain identifier or the reserved `vec` (usable as a
+// scope/struct name and inside `::` chains, e.g. `scope vec`, `vec::push`)
+static token consume_path_segment(Parser *parser, const char *expected) {
+        if (check(parser, TOKEN_VEC)) {
+                return advance(parser);
+        }
+        return consume(parser, TOKEN_ID, expected);
+}
 ASTnode *parse_statement(Parser *parser) {
         if (check(parser, TOKEN_STRUCT)) {
                 match(parser, TOKEN_STRUCT);
@@ -103,19 +111,36 @@ ASTnode *parse_statement(Parser *parser) {
             check(parser, TOKEN_BOOL)) {
                 return parse_declaration(parser);
         }
-        // user-type declaration: `Point p` — ID followed by ID (keeps `x`, `x = 5`, `foo()` on expression path)
-        // or `Point[2] arr` — ID [ INUM ] ID (keeps `arr[0] = v` on expression path)
-        if (check(parser, TOKEN_ID) && parser->current + 1 < parser->tokens->size) {
-                tokenType nxt = parser->tokens->tokens[parser->current + 1].type;
-                if (nxt == TOKEN_ID) {
+        // user-type declaration: `Point p`, `Point[2] arr`, `geo::Vec v`
+        // scan the full a(::b)* chain first so `std::hi()` stays a call:
+        // decl iff the chain is followed by ID (var name) or [ INUM ] ID (array var)
+        if (check(parser, TOKEN_ID)) {
+                size_t j = parser->current; // tokens[j] is ID
+                size_t n = parser->tokens->size;
+                while (j + 2 < n && parser->tokens->tokens[j + 1].type == TOKEN_DCOLON &&
+                       parser->tokens->tokens[j + 2].type == TOKEN_ID) {
+                        j += 2;
+                }
+                bool is_decl = false;
+                if (j + 1 < n) {
+                        tokenType after = parser->tokens->tokens[j + 1].type;
+                        if (after == TOKEN_ID) is_decl = true;
+                        else if (after == TOKEN_LSPAREN && j + 4 < n &&
+                                 parser->tokens->tokens[j + 2].type == TOKEN_INUM &&
+                                 parser->tokens->tokens[j + 3].type == TOKEN_RSPAREN &&
+                                 parser->tokens->tokens[j + 4].type == TOKEN_ID) {
+                                is_decl = true;
+                        }
+                }
+                if (is_decl) {
                         return parse_declaration(parser);
                 }
-                if (nxt == TOKEN_LSPAREN && parser->current + 4 < parser->tokens->size &&
-                    parser->tokens->tokens[parser->current + 2].type == TOKEN_INUM &&
-                    parser->tokens->tokens[parser->current + 3].type == TOKEN_RSPAREN &&
-                    parser->tokens->tokens[parser->current + 4].type == TOKEN_ID) {
-                        return parse_declaration(parser);
-                }
+        }
+        // bare `vec` (not a `vec::` path — those go to parse_call): removed generic type
+        if (check(parser, TOKEN_VEC) && !(parser->current + 1 < parser->tokens->size &&
+            parser->tokens->tokens[parser->current + 1].type == TOKEN_DCOLON)) {
+                token t = peek(parser);
+                quil_error_at(STAGE_PARSER, ERR_UNKNOWN, t.line, t.col, "vec has been removed, use array type 'int32[N]' (vec will be stdlib later)");
         }
         if (match(parser, TOKEN_IF)) {
                 return parse_if_statement(parser);
@@ -144,7 +169,7 @@ ASTnode *parse_statement(Parser *parser) {
                 return node;
         }
         if (match(parser, TOKEN_SCOPE)) {
-                token ns = consume(parser, TOKEN_ID, "namespace name after 'scope'");
+                token ns = consume_path_segment(parser, "namespace name after 'scope'");
                 ASTnode *body = parse_block(parser); // { ... }
                 return make_namespace_node(ns.value, body);
         }
@@ -273,7 +298,10 @@ static void parse_type(Parser *parser, char **out_type_name, char **out_element_
         *out_type_name = NULL;
         *out_element_type = NULL;
 
-        if (check(parser, TOKEN_VEC)) {
+        // `vec` is reserved (removed generic type) but still usable as a scope/struct
+        // name and inside `::` chains — only a bare `vec` type errors here
+        if (check(parser, TOKEN_VEC) && !(parser->current + 1 < parser->tokens->size &&
+            parser->tokens->tokens[parser->current + 1].type == TOKEN_DCOLON)) {
                 token t = peek(parser);
                 quil_error_at(STAGE_PARSER, ERR_UNKNOWN, t.line, t.col, "vec has been removed, use array type 'int32[N]' (vec will be stdlib later)");
         }
@@ -293,10 +321,21 @@ static void parse_type(Parser *parser, char **out_type_name, char **out_element_
         else if (match(parser, TOKEN_CHAR)) *out_type_name = "char";
         else if (match(parser, TOKEN_STRING)) *out_type_name = "string";
         else if (match(parser, TOKEN_BOOL)) *out_type_name = "bool";
-        else if (check(parser, TOKEN_ID)) {
-                // user type (struct name) — resolved against sema types table
+        else if (check(parser, TOKEN_ID) || check(parser, TOKEN_VEC)) {
+                // user type (struct name), possibly qualified: geo::Vec
+                // resolved against sema types table (cur_ns::T preferred, then T)
                 token t = advance(parser);
-                *out_type_name = strdup(t.value);
+                size_t len = strlen(t.value) + 1;
+                char *name = malloc(len);
+                snprintf(name, len, "%s", t.value);
+                while (match(parser, TOKEN_DCOLON)) {
+                        token seg = consume_path_segment(parser, "identifier after '::'");
+                        size_t nlen = strlen(name) + 2 + strlen(seg.value) + 1;
+                        name = realloc(name, nlen);
+                        strcat(name, "::");
+                        strcat(name, seg.value);
+                }
+                *out_type_name = name;
         } else {
                 token found = peek(parser);
                 quil_expected_at(STAGE_PARSER, found.line, found.col, "a data type (int32, float64, etc.)", peek_display(parser));
@@ -349,7 +388,7 @@ ASTnode *parse_block(Parser *parser) {
 
 // - Struct pasing -
 ASTnode *parse_struct_def(Parser *parser) {
-        token name = consume(parser, TOKEN_ID, "struct name after 'struct'");
+        token name = consume_path_segment(parser, "struct name after 'struct'");
         ASTnode *body = parse_block(parser);
         ASTnode *def = make_struct_def_node(name.value);
         ast_set_loc(def, name.line, name.col);
@@ -522,7 +561,16 @@ ASTnode *parse_primary(Parser *parser) {
 // parses function call and member access
 // parses and refers to parse_primary
 ASTnode *parse_call(Parser *parser) {
-        ASTnode *node = parse_primary(parser);
+        ASTnode *node;
+        // `vec::...` starts with the reserved vec token instead of an identifier
+        if (check(parser, TOKEN_VEC) && parser->current + 1 < parser->tokens->size &&
+            parser->tokens->tokens[parser->current + 1].type == TOKEN_DCOLON) {
+                token v = advance(parser);
+                node = make_identifier_node(v.value);
+                ast_set_loc(node, v.line, v.col);
+        } else {
+                node = parse_primary(parser);
+        }
         // fold a::b::c into NODE_QUALIFIED (must be before call/dot handling)
         if (node->type == NODE_IDENTIFIER) {
                 int cap = 4, count = 1;
@@ -530,7 +578,7 @@ ASTnode *parse_call(Parser *parser) {
                 segs[0] = strdup(node->data.identifier.name);
                 int qline = node->line, qcol = node->col;
                 while (match(parser, TOKEN_DCOLON)) {
-                        token t = consume(parser, TOKEN_ID, "identifier after '::'");
+                        token t = consume_path_segment(parser, "identifier after '::'");
                         if (count >= cap) {
                                 cap *= 2;
                                 segs = realloc(segs, cap * sizeof(char *));

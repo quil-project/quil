@@ -64,6 +64,18 @@ static char *mangle(const char *qname);
 static void emit_func(Ssagen *s, ASTnode *fndef);
 
 /* --- HELPER --- */
+static bool is_unsigned_type(const char *t) {
+        if (!t) return false;
+        return strncmp(t, "uint", 4) == 0;
+}
+static Ref promote_kw_to_kl(Ssagen *s, ASTnode *node, Ref r) {
+        // int literals as immediates cannot be extsw $imm -> movslq $imm (invalid); create l immediate directly
+        if (node->type == NODE_INT_LITERAL) {
+                return il_const_int_l(s->ilb, (int64_t)node->data.int_literal.value);
+        }
+        bool u = is_unsigned_type(node->resolved_type);
+        return u ? il_create_extuw_l(s->ilb, r) : il_create_extsw_l(s->ilb, r);
+}
 // enum { Kx=-1, Kw, Kl, Ks, Kd };
 static int quil_to_cls(const char *t) {
         if (!t) return Kw;
@@ -284,11 +296,9 @@ static Ref emit_expr(Ssagen *s, ASTnode *n) {
                 Ref *slotp = hashmap_get(s->slots, n->data.identifier.name, &found);
                 if (!found) quil_error(STAGE_CODEGEN, ERR_UNDECLARED_VAR, n->data.identifier.name);
                 Ref slot = *slotp;
-                int cls = quil_to_cls(n->resolved_type);
-                if (cls == Kl) return il_create_load_l(s->ilb, slot);
-                if (cls == Ks) return il_create_load_s(s->ilb, slot);
-                if (cls == Kd) return il_create_load_d(s->ilb, slot);
-                return il_create_load_w(s->ilb, slot); // Kw bool char int8/16/32
+                // use element-sized load to handle int8/int16 sign/zero extension correctly
+                // (load_w on a 2-byte slot would read 4 bytes including garbage)
+                return emit_load_elem(s, n->resolved_type, slot);
         }
         case NODE_ARRAY_ACCESS: { // arr[i] -> *(base + i * size)
                 bool found;
@@ -311,7 +321,40 @@ static Ref emit_expr(Ssagen *s, ASTnode *n) {
                 Ref l = emit_expr(s, n->data.binary_expression.left);
                 Ref r = emit_expr(s, n->data.binary_expression.right);
                 tokenType op = n->data.binary_expression.op;
+                // comparisons produce bool but must be dispatched on operand type, not result type
+                bool is_cmp = (op == TOKEN_EEQUAL || op == TOKEN_NEQUAL || op == TOKEN_LABRACKET ||
+                               op == TOKEN_RABRACKET || op == TOKEN_LEQUAL || op == TOKEN_GEQUAL);
+                if (is_cmp) {
+                        int lhs_cls = quil_to_cls(n->data.binary_expression.left->resolved_type);
+                        int rhs_cls = quil_to_cls(n->data.binary_expression.right->resolved_type);
+                        int cmp_cls = (lhs_cls == Kl || rhs_cls == Kl) ? Kl : Kw;
+                        bool u = is_unsigned_type(n->data.binary_expression.left->resolved_type) ||
+                                 is_unsigned_type(n->data.binary_expression.right->resolved_type);
+                        if (cmp_cls == Kl) {
+                                // promote Kw operands to Kl for 64-bit compare
+                                if (lhs_cls == Kw) {
+                                        l = promote_kw_to_kl(s, n->data.binary_expression.left, l);
+                                }
+                                if (rhs_cls == Kw) {
+                                        r = promote_kw_to_kl(s, n->data.binary_expression.right, r);
+                                }
+                                if (op == TOKEN_EEQUAL) return il_create_icmp_eq_l(s->ilb, l, r);
+                                if (op == TOKEN_NEQUAL) return il_create_icmp_ne_l(s->ilb, l, r);
+                                if (op == TOKEN_LABRACKET) return u ? il_create_icmp_ult_l(s->ilb, l, r) : il_create_icmp_slt_l(s->ilb, l, r);
+                                if (op == TOKEN_RABRACKET) return u ? il_create_icmp_ugt_l(s->ilb, l, r) : il_create_icmp_sgt_l(s->ilb, l, r);
+                                if (op == TOKEN_LEQUAL) return u ? il_create_icmp_ule_l(s->ilb, l, r) : il_create_icmp_sle_l(s->ilb, l, r);
+                                if (op == TOKEN_GEQUAL) return u ? il_create_icmp_uge_l(s->ilb, l, r) : il_create_icmp_sge_l(s->ilb, l, r);
+                        } else {
+                                if (op == TOKEN_EEQUAL) return il_create_icmp_eq_w(s->ilb, l, r);
+                                if (op == TOKEN_NEQUAL) return il_create_icmp_ne_w(s->ilb, l, r);
+                                if (op == TOKEN_LABRACKET) return u ? il_create_icmp_ult_w(s->ilb, l, r) : il_create_icmp_slt_w(s->ilb, l, r);
+                                if (op == TOKEN_RABRACKET) return u ? il_create_icmp_ugt_w(s->ilb, l, r) : il_create_icmp_sgt_w(s->ilb, l, r);
+                                if (op == TOKEN_LEQUAL) return u ? il_create_icmp_ule_w(s->ilb, l, r) : il_create_icmp_sle_w(s->ilb, l, r);
+                                if (op == TOKEN_GEQUAL) return u ? il_create_icmp_uge_w(s->ilb, l, r) : il_create_icmp_sge_w(s->ilb, l, r);
+                        }
+                }
                 int cls = quil_to_cls(n->resolved_type);
+                bool u = is_unsigned_type(n->resolved_type);
                 if (cls == Kd) {
                         switch (op) {
                         case TOKEN_PLUS: return il_create_add_d(s->ilb, l, r);
@@ -329,31 +372,36 @@ static Ref emit_expr(Ssagen *s, ASTnode *n) {
                         default: break;
                         }
                 } else if (cls == Kl) {
+                        // promote Kw operands to Kl (e.g. int16 * uint64)
+                        int l_cls = quil_to_cls(n->data.binary_expression.left->resolved_type);
+                        int r_cls = quil_to_cls(n->data.binary_expression.right->resolved_type);
+                        if (l_cls == Kw) {
+                                l = promote_kw_to_kl(s, n->data.binary_expression.left, l);
+                        }
+                        if (r_cls == Kw) {
+                                r = promote_kw_to_kl(s, n->data.binary_expression.right, r);
+                        }
                         switch (op) {
                         case TOKEN_PLUS: return il_create_add_l(s->ilb, l, r);
                         case TOKEN_MINUS: return il_create_sub_l(s->ilb, l, r);
                         case TOKEN_STAR: return il_create_mul_l(s->ilb, l, r);
-                        case TOKEN_FSLASH: return il_create_div_l(s->ilb, l, r);
-                        case TOKEN_PERCENT: return il_create_rem_l(s->ilb, l, r);
+                        case TOKEN_FSLASH: return u ? il_create_udiv_l(s->ilb, l, r) : il_create_div_l(s->ilb, l, r);
+                        case TOKEN_PERCENT: return u ? il_create_urem_l(s->ilb, l, r) : il_create_rem_l(s->ilb, l, r);
                         case TOKEN_AND: return il_create_and_l(s->ilb, l, r);
                         case TOKEN_PIPE: return il_create_or_l(s->ilb, l, r);
                         case TOKEN_CARET: return il_create_xor_l(s->ilb, l, r);
                         default: break;
                         }
-                        // comparisons
+                        // equality for Kl arithmetic results (non-cmp path fallback)
                         if (op == TOKEN_EEQUAL) return il_create_icmp_eq_l(s->ilb, l, r);
                         if (op == TOKEN_NEQUAL) return il_create_icmp_ne_l(s->ilb, l, r);
-                        if (op == TOKEN_LABRACKET) return il_create_icmp_slt_l(s->ilb, l, r);
-                        if (op == TOKEN_RABRACKET) return il_create_icmp_sgt_l(s->ilb, l, r);
-                        if (op == TOKEN_LEQUAL) return il_create_icmp_sle_l(s->ilb, l, r);
-                        if (op == TOKEN_GEQUAL) return il_create_icmp_sge_l(s->ilb, l, r);
                 } else /* Kw */ {
                         switch (op) {
                         case TOKEN_PLUS: return il_create_add_w(s->ilb, l, r);
                         case TOKEN_MINUS: return il_create_sub_w(s->ilb, l, r);
                         case TOKEN_STAR: return il_create_mul_w(s->ilb, l, r);
-                        case TOKEN_FSLASH: return il_create_div_w(s->ilb, l, r);
-                        case TOKEN_PERCENT: return il_create_rem_w(s->ilb, l, r);
+                        case TOKEN_FSLASH: return u ? il_create_udiv_w(s->ilb, l, r) : il_create_div_w(s->ilb, l, r);
+                        case TOKEN_PERCENT: return u ? il_create_urem_w(s->ilb, l, r) : il_create_rem_w(s->ilb, l, r);
                         case TOKEN_AND: return il_create_and_w(s->ilb, l, r);
                         case TOKEN_PIPE: return il_create_or_w(s->ilb, l, r);
                         case TOKEN_CARET: return il_create_xor_w(s->ilb, l, r);
@@ -361,10 +409,6 @@ static Ref emit_expr(Ssagen *s, ASTnode *n) {
                         }
                         if (op == TOKEN_EEQUAL) return il_create_icmp_eq_w(s->ilb, l, r);
                         if (op == TOKEN_NEQUAL) return il_create_icmp_ne_w(s->ilb, l, r);
-                        if (op == TOKEN_LABRACKET) return il_create_icmp_slt_w(s->ilb, l, r);
-                        if (op == TOKEN_RABRACKET) return il_create_icmp_sgt_w(s->ilb, l, r);
-                        if (op == TOKEN_LEQUAL) return il_create_icmp_sle_w(s->ilb, l, r);
-                        if (op == TOKEN_GEQUAL) return il_create_icmp_sge_w(s->ilb, l, r);
                         if (op == TOKEN_OR) return il_create_or_w(s->ilb, l, r);
                         if (op == TOKEN_AND) return il_create_and_w(s->ilb, l, r);
                 }
@@ -485,7 +529,7 @@ static void emit_stmt(Ssagen *s, ASTnode *n) {
                                 for (int i = 0; i < lst->data.list_literal.count; i++) {
                                         Ref ev = emit_expr(s, lst->data.list_literal.elements[i]);
                                         Ref off = il_create_mul_w(s->ilb, il_const_int_w(s->ilb, i),
-                                                                                il_const_int_w(s->ilb, esz));
+                                                                  il_const_int_w(s->ilb, esz));
                                         Ref addr = il_create_add_l(s->ilb, slot, il_create_extsw_l(s->ilb, off));
                                         emit_store_elem(s, t, ev, addr);
                                 }
@@ -773,14 +817,18 @@ static void emit_func(Ssagen *s, ASTnode *fndef) {
                 *rp = slot;                                               // PHeap so survives freeall()
                 hashmap_put(s->slots, strdup(p->data.var_decl.name), rp); // slots name->Ref Kl
                 if (psz == 1 || psz == 2) emit_store_elem(s, p->data.var_decl.type_name, prs[i], slot);
-                else il_create_store(s->ilb, cls, prs[i], slot);          // store param to slot
+                else il_create_store(s->ilb, cls, prs[i], slot); // store param to slot
         }
         // body BLOCK include/ast.h:191 -> emit_stmt() for each stmt
         for (int i = 0; i < fndef->data.func_def.body->data.blocks.count; i++) {
                 emit_stmt(s, fndef->data.func_def.body->data.blocks.statements[i]);
         }
-        if (!s->ilb->cur || s->ilb->cur->jmp.type == Jxxx) il_create_ret_void(s->ilb); // if no ret
-        fn = il_finish(s->ilb);                                                        // nblk + rpo
+        if (!s->ilb->cur || s->ilb->cur->jmp.type == Jxxx) {
+                // `public fn main()` is void in quil but must exit 0 for the OS; explicit `ret 0`
+                if (strcmp(qname, "main") == 0) il_create_ret_w(s->ilb, il_const_int_w(s->ilb, 0));
+                else il_create_ret_void(s->ilb);
+        }
+        fn = il_finish(s->ilb); // nblk + rpo
         il_module_add_function(s->mod, fn);
         s->ilb = NULL;
         hashmap_clear(s->slots);
