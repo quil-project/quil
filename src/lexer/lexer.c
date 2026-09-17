@@ -8,8 +8,8 @@
  * Issues: <https://github.com/quil-project/quil>
  *************************************************/
 
-#include "../include/lexer.h"
-#include "../include/mode.h"
+#include "../../include/lexer.h"
+#include "../../include/mode.h"
 #include <limits.h>
 #include <stdint.h>
 #include <stdlib.h>

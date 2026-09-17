@@ -11,8 +11,8 @@
 // NOTE: Different filter functions in include/lexer.h will be defined here.
 // These functions are used to filter unusual tokens and refine tokens.
 
-#include "../include/lexer.h"
-#include "../include/mode.h"
+#include "../../include/lexer.h"
+#include "../../include/mode.h"
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
