@@ -321,17 +321,39 @@ static void sem_analyze_node(SemAnalyzer *a, ASTnode *node) {
 
         // ---- Declarations & assignment ----
         case NODE_VAR_DECL: {
-                // struct types resolve to their qualified table name (cur_ns::T preferred)
-                char *rtype = sem_resolve_type(a, node->data.var_decl.type_name);
-                if (!rtype) {
-                        quil_error_at(STAGE_SEMANTIC, ERR_UNDECLARED_TYPE, node->line, node->col, node->data.var_decl.type_name);
-                }
-                char *type = sem_fulltype(rtype, node->data.var_decl.modifiers, NULL);
-                free(rtype);
-                sem_declare(a, node->data.var_decl.name, type, node->line, node->col);
-                free(type); // sem_declare strdup'd it so we can free this copy
-                if (node->data.var_decl.value) {
+                char *type = NULL;
+                char *rtype = NULL;
+                if (node->data.var_decl.is_inferred) {
+                        if (!node->data.var_decl.value) {
+                                quil_error_at(STAGE_SEMANTIC, ERR_UNDECLARED_TYPE, node->line, node->col, ":= requires initializer");
+                        }
                         sem_analyze_node(a, node->data.var_decl.value);
+                        const char *vt = node->data.var_decl.value->resolved_type;
+                        if (!vt) quil_error_at(STAGE_SEMANTIC, ERR_UNDECLARED_TYPE, node->line, node->col, "cannot infer type");
+                        node->resolved_type = strdup(vt);
+                        type = strdup(vt);
+                        // also set type_name for codegen (use inferred type)
+                        free(node->data.var_decl.type_name);
+                        node->data.var_decl.type_name = strdup(vt);
+                        sem_declare(a, node->data.var_decl.name, type, node->line, node->col);
+                        free(type);
+                } else {
+                        rtype = sem_resolve_type(a, node->data.var_decl.type_name);
+                        if (!rtype) {
+                                quil_error_at(STAGE_SEMANTIC, ERR_UNDECLARED_TYPE, node->line, node->col, node->data.var_decl.type_name);
+                        }
+                        type = sem_fulltype(rtype, node->data.var_decl.modifiers, NULL);
+                        free(rtype);
+                        node->resolved_type = strdup(type);
+                        sem_declare(a, node->data.var_decl.name, type, node->line, node->col);
+                        free(type);
+                        if (node->data.var_decl.value) {
+                                sem_analyze_node(a, node->data.var_decl.value);
+                        }
+                }
+                if (node->data.var_decl.is_const) {
+                        char *k = strdup(node->data.var_decl.name);
+                        hashmap_put(a->const_vars, k, (void*)1);
                 }
                 break;
         }
@@ -353,6 +375,11 @@ static void sem_analyze_node(SemAnalyzer *a, ASTnode *node) {
                 const char *type = sem_resolve(a, node->data.assign.name);
                 if (!type) {
                         quil_error_at(STAGE_SEMANTIC, ERR_UNDECLARED_VAR, node->line, node->col, node->data.assign.name);
+                }
+                bool found_const = false;
+                hashmap_get(a->const_vars, node->data.assign.name, &found_const);
+                if (found_const) {
+                        quil_error_at(STAGE_SEMANTIC, ERR_REASSIGN_CONST, node->line, node->col, node->data.assign.name);
                 }
                 // element type for arr[i] = v (arrays are homogeneous, so var type == elem type)
                 node->resolved_type = strdup(type);
@@ -583,6 +610,7 @@ void semantic_analyze(ASTnode *program) {
         SemAnalyzer a = {0};
         a.functions = hashmap_create(hm_hash_str, hm_eq_str, free, funcSig_free);
         a.types = hashmap_create(hm_hash_str, hm_eq_str, free, structdef_free);
+        a.const_vars = hashmap_create(hm_hash_str, hm_eq_str, free, NULL);
         sem_analyze_node(&a, program);
 
         // check for fn main() - must be public fn main()
@@ -597,5 +625,6 @@ void semantic_analyze(ASTnode *program) {
 
         hashmap_free(a.functions);
         hashmap_free(a.types);
+        hashmap_free(a.const_vars);
         free(a.frames);
 }

@@ -56,6 +56,7 @@ typedef enum {
         ERR_NO_MAIN,         // program has no 'fn main()' entry point
         ERR_MAIN_NOT_PUBLIC, // main must be public
         ERR_TOP_LEVEL_STMT,  // statement at file scope that isn't a declaration
+        ERR_REASSIGN_CONST,  // reassignment of const variable
 
         // File / CLI errors
         ERR_NO_INPUT_FILE,     // no input file provided

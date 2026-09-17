@@ -92,12 +92,14 @@ struct ASTnode {
 
                 // NODE_VAR_DECL: Declaring a new variable.
                 struct {
-                        char *type_name; // e.g., "int", "float"
+                        char *type_name; // e.g., "int", "float" - NULL if inferred via :=
                         char *modifiers; // e.g., "unsigned", "long"
                         char *name;      // Variable name
                         ASTnode *value;  // Initial value expression (can be NULL)
                         bool is_array;
                         int array_size; // Size if it's an array, 0 otherwise
+                        bool is_const;   // true if `const` keyword present
+                        bool is_inferred; // true if `:=` used, type inferred from value
                 } var_decl;
 
                 // NODE_ASSIGN: Assigning a value to an existing variable.
@@ -275,7 +277,7 @@ ASTnode *make_if_stat_node(ASTnode *condition, ASTnode *then_block, ASTnode *els
 ASTnode *make_while_node(ASTnode *condition, ASTnode *body);
 ASTnode *make_for_node(ASTnode *init, ASTnode *condition, ASTnode *increment, ASTnode *body);
 ASTnode *make_directive_node(char *name, char *value);
-ASTnode *make_var_decl_node(char *type_name, char *modifiers, char *name, ASTnode *value, bool is_array, int array_size);
+ASTnode *make_var_decl_node(char *type_name, char *modifiers, char *name, ASTnode *value, bool is_array, int array_size, bool is_const, bool is_inferred);
 ASTnode *make_assign_node(char *name, ASTnode *value);
 ASTnode *make_array_assign_node(char *name, ASTnode *index, ASTnode *value);
 ASTnode *make_member_assign_node(ASTnode *obj, char *member, ASTnode *value);

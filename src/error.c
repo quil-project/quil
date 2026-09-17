@@ -164,6 +164,9 @@ static void print_error_message(ErrorStage stage, ErrorCode code, int line, int 
         case ERR_TOP_LEVEL_STMT:
                 fprintf(stderr, "statement not allowed at top level; put it inside 'fn main()'");
                 break;
+        case ERR_REASSIGN_CONST:
+                fprintf(stderr, "cannot assign to const variable '%s'", d);
+                break;
         case ERR_NO_INPUT_FILE:
                 fprintf(stderr, "no input file provided");
                 break;

@@ -20,6 +20,7 @@ typedef struct {
         HashMap **frames;      // stack of symbol tables
         HashMap *functions;    // table for function type and name
         HashMap *types;        // qualified struct name -> StructDef*
+        HashMap *const_vars;   // name -> (void*)1 for const variables
         size_t frame_count;    // number of scopes currently open
         size_t frame_capacity; // allocated slots
         char *cur_ns;          // current namespace/scope

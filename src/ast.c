@@ -182,7 +182,7 @@ ASTnode *make_for_node(ASTnode *init, ASTnode *condition, ASTnode *increment, AS
         node->data.for_loop.body = body;
         return node;
 }
-ASTnode *make_var_decl_node(char *type_name, char *modifiers, char *name, ASTnode *value, bool is_array, int array_size) {
+ASTnode *make_var_decl_node(char *type_name, char *modifiers, char *name, ASTnode *value, bool is_array, int array_size, bool is_const, bool is_inferred) {
         ASTnode *node = create_ast_node(NODE_VAR_DECL);
         node->data.var_decl.type_name = type_name ? strdup(type_name) : NULL;
         node->data.var_decl.modifiers = modifiers ? strdup(modifiers) : NULL;
@@ -190,6 +190,8 @@ ASTnode *make_var_decl_node(char *type_name, char *modifiers, char *name, ASTnod
         node->data.var_decl.value = value;
         node->data.var_decl.is_array = is_array;
         node->data.var_decl.array_size = array_size;
+        node->data.var_decl.is_const = is_const;
+        node->data.var_decl.is_inferred = is_inferred;
         return node;
 }
 ASTnode *make_assign_node(char *name, ASTnode *value) {
@@ -541,9 +543,11 @@ void print_ast(ASTnode *node, int level) {
                 }
                 break;
         case NODE_VAR_DECL:
-                printf("VAR_DECL: %s %s %s", node->data.var_decl.modifiers ? node->data.var_decl.modifiers : "",
-                       node->data.var_decl.type_name ? node->data.var_decl.type_name : "", node->data.var_decl.name);
+                printf("VAR_DECL: %s%s %s %s", node->data.var_decl.is_const ? "const " : "",
+                       node->data.var_decl.modifiers ? node->data.var_decl.modifiers : "",
+                       node->data.var_decl.type_name ? node->data.var_decl.type_name : (node->data.var_decl.is_inferred ? "<inferred>" : ""), node->data.var_decl.name);
                 if (node->data.var_decl.is_array) printf("[%d]", node->data.var_decl.array_size);
+                if (node->data.var_decl.is_inferred) printf(" :=");
                 printf("\n");
                 if (node->data.var_decl.value) {
                         print_ast(node->data.var_decl.value, level + 1);

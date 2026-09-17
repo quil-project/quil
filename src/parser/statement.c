@@ -40,6 +40,13 @@ ASTnode *parse_statement(Parser *parser) {
                 }
                 return fn;
         }
+        if (check(parser, TOKEN_CONST)) {
+                return parse_declaration(parser);
+        }
+        if (check(parser, TOKEN_ID) && parser->current + 1 < (int)parser->tokens->size &&
+            parser->tokens->tokens[parser->current + 1].type == TOKEN_COLON_EQUAL) {
+                return parse_declaration(parser);
+        }
         if (check(parser, TOKEN_INT8) || check(parser, TOKEN_INT16) ||
             check(parser, TOKEN_INT32) || check(parser, TOKEN_INT64) ||
             check(parser, TOKEN_UINT8) || check(parser, TOKEN_UINT16) ||

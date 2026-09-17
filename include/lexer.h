@@ -42,6 +42,7 @@ typedef enum {
         TOKEN_PUBLIC,   // keyword public, marks fn as exported
         TOKEN_EXTERN,   // keyword extern, declares fn without body (prototype)
         TOKEN_STRUCT,   // keyword struct, defines an aggregate type
+        TOKEN_CONST,    // keyword const, marks var as immutable
         // Data types
         TOKEN_BOOL,    // boolean data type
         TOKEN_INT8,    // 8-bit signed integer
@@ -70,6 +71,7 @@ typedef enum {
         TOKEN_COMMA,       // "," comma
         TOKEN_SEMICOLON,   // ";" semicolon
         TOKEN_COLON,       // ":" colon (for ternary ? :)
+        TOKEN_COLON_EQUAL, // ":=" Go-style inferred decl
         TOKEN_DCOLON,      // "::" double colon (namespace qualifier)
         TOKEN_ARROW,       // "->" arrow (return-type separator)
         TOKEN_LRPAREN,     // "(" left round parenthesis

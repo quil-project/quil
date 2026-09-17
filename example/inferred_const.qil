@@ -1,0 +1,48 @@
+// inferred types `:=` and `const` - Go-style sugar for quil
+// build: ./bin/quil -o /tmp/inferred_const example/inferred_const.qil && /tmp/inferred_const; echo $?
+// expected exit: 42
+
+struct Point {
+    uint64 x
+    uint64 y
+}
+
+fn make_point(uint64 a, uint64 b) -> Point {
+    Point res
+    res.x = a
+    res.y = b
+    return res
+}
+
+public fn main() -> int32 {
+    // ---- inferred var `:=` (type from init) ----
+    x := 10              // int32
+    y := 20.5            // float64 (inferred)
+
+    // ---- const inferred `const name := value` ----
+    const a := 5         // const int32
+
+    // ---- const explicit `const type name = value` ----
+    const int32 c = 12   // const int32
+
+    // ---- inferred struct `p := make_point` ----
+    p := make_point(7, 8) // Point inferred
+
+    // ---- inferred from var copy ----
+    z := x               // int32 copy
+
+    // ---- classic still works ----
+    int32 s = 0
+    s = s + x + a + c + z + p.x + p.y
+    // 10 + 5 + 12 + 10 + 7 + 8 = 52? adjust to 42
+    // use 10+5+12+7+8 =42 (drop extra z)
+    s = 0
+    s = s + x + a + c + p.x + p.y
+    // 10+5+12+7+8 =42
+
+    // float inferred not in int sum
+    // const reassignment would error: uncomment to test sema
+    // a = 20 // semantic: cannot assign to const variable 'a'
+
+    return s // 42
+}

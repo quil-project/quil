@@ -57,6 +57,21 @@ void parse_type(Parser *parser, char **out_type_name, char **out_element_type) {
 }
 
 ASTnode *parse_declaration(Parser *parser) {
+        bool is_const = false;
+        if (match(parser, TOKEN_CONST)) is_const = true;
+
+        // inferred `x := expr` or `const x := expr`  (no type)
+        if (check(parser, TOKEN_ID) && parser->current + 1 < (int)parser->tokens->size &&
+            parser->tokens->tokens[parser->current + 1].type == TOKEN_COLON_EQUAL) {
+                token name = advance(parser);
+                consume(parser, TOKEN_COLON_EQUAL, ":=");
+                ASTnode *init = parse_expression(parser);
+                consume_end_of_statement(parser);
+                ASTnode *decl = make_var_decl_node(NULL, NULL, name.value, init, false, 0, is_const, true);
+                ast_set_loc(decl, name.line, name.col);
+                return decl;
+        }
+
         char *data_type = NULL;
         char *element_type = NULL;
         parse_type(parser, &data_type, &element_type);
@@ -71,11 +86,15 @@ ASTnode *parse_declaration(Parser *parser) {
         token name_token = consume(parser, TOKEN_ID, "a variable name");
         char *var_name = name_token.value;
         ASTnode *initializer = NULL;
+        bool is_inferred = false;
         if (match(parser, TOKEN_EQUAL)) {
+                initializer = parse_expression(parser);
+        } else if (match(parser, TOKEN_COLON_EQUAL)) {
+                is_inferred = true;
                 initializer = parse_expression(parser);
         }
         consume_end_of_statement(parser);
-        ASTnode *decl = make_var_decl_node(data_type, NULL, var_name, initializer, is_array, array_size);
+        ASTnode *decl = make_var_decl_node(data_type, NULL, var_name, initializer, is_array, array_size, is_const, is_inferred);
         ast_set_loc(decl, name_token.line, name_token.col);
         return decl;
 }
@@ -110,7 +129,7 @@ ASTnode *parse_func_def_param(Parser *parser) {
                 is_array = true;
         }
         token name_token = consume(parser, TOKEN_ID, "a parameter name");
-        ASTnode *param = make_var_decl_node(type_name, NULL, name_token.value, NULL, is_array, array_size);
+        ASTnode *param = make_var_decl_node(type_name, NULL, name_token.value, NULL, is_array, array_size, false, false);
         ast_set_loc(param, name_token.line, name_token.col);
         return param;
 }

@@ -228,6 +228,9 @@ token lexer_tokenizer(FILE *buffer) {
                         if (ch == ':') {
                                 tokens.type = TOKEN_DCOLON;
                                 tokens.value = strdup("::");
+                        } else if (ch == '=') {
+                                tokens.type = TOKEN_COLON_EQUAL;
+                                tokens.value = strdup(":=");
                         } else {
                                 if (ch != EOF) lexer_ungetc(ch, buffer);
                                 tokens.type = TOKEN_COLON;
@@ -668,6 +671,12 @@ token lexer_tokenize_words(FILE *buffer) {
                 } else {
                         tokens.type = TOKEN_STRUCT;
                 }
+        } else if (strcmp(char_buffer, "const") == 0) {
+                if (SQUOTE_MODE || DQUOTE_MODE) {
+                        tokens.type = TOKEN_QSTRING;
+                } else {
+                        tokens.type = TOKEN_CONST;
+                }
         } else if (strcmp(char_buffer, "long") == 0) {
                 tokens.type = TOKEN_ID;
         } else if (strcmp(char_buffer, "short") == 0) {
@@ -888,6 +897,8 @@ const char *lexer_token_type_to_string(tokenType type) {
                 return "TOKEN_EXTERN";
         case TOKEN_STRUCT:
                 return "TOKEN_STRUCT";
+        case TOKEN_CONST:
+                return "TOKEN_CONST";
         case TOKEN_TRUE:
                 return "TOKEN_TRUE";
         case TOKEN_FALSE:
@@ -912,6 +923,8 @@ const char *lexer_token_type_to_string(tokenType type) {
                 return "TOKEN_SEMICOLON";
         case TOKEN_COLON:
                 return "TOKEN_COLON";
+        case TOKEN_COLON_EQUAL:
+                return "TOKEN_COLON_EQUAL";
         case TOKEN_DCOLON:
                 return "TOKEN_DCOLON";
         case TOKEN_ARROW:
