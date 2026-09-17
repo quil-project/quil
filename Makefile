@@ -13,7 +13,7 @@ CC ?= cc
 RCFLAGS += -Wall -Wextra -O2    # cflags for release make
 DCFLAGS += -Wall -Wextra -g -O2 # cflags for default make
 FEATHER_CFLAGS = -std=c99 -Wall -Wextra -Wpedantic -g -O2
-SRC = src/main.c src/cli.c src/lexer/lexer.c src/lexer/filter.c \
+SRC = src/main.c src/cli.c src/lexer/lexer.c src/lexer/filter.c src/lexer/helper.c \
       src/parser/parser.c src/parser/statement.c src/parser/declaration.c src/parser/expression.c \
       src/ast.c src/helper.c src/error.c src/_hashmap.c src/sema.c \
       src/codegen/ssagen.c src/codegen/types.c src/codegen/expr.c src/codegen/stmt.c
