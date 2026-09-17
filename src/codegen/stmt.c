@@ -9,7 +9,6 @@
  *************************************************/
 
 #include "internal.h"
-#include <stdlib.h>
 
 Ref emit_obj_addr(Ssagen *s, ASTnode *obj) {
         if (obj->type == NODE_IDENTIFIER) {
@@ -55,7 +54,44 @@ void emit_stmt(Ssagen *s, ASTnode *n) {
                 *rp = slot;
                 hashmap_put(s->slots, strdup(n->data.var_decl.name), rp);
                 if (n->data.var_decl.value) {
-                        if (n->data.var_decl.value->type == NODE_LIST_LITERAL) {
+                        if (ssa_is_struct(s, t)) {
+                                // struct init: handle call returning struct, identifier copy, etc. via memcpy
+                                ASTnode *init = n->data.var_decl.value;
+                                Ref src;
+                                if (init->type == NODE_FUNC_CALL && ssa_is_struct(s, init->resolved_type)) {
+                                        src = emit_expr(s, init); // returns tmp addr of struct
+                                } else if (init->type == NODE_IDENTIFIER || init->type == NODE_MEMBER_ACCESS || init->type == NODE_ARRAY_ACCESS) {
+                                        src = emit_obj_addr(s, init);
+                                } else {
+                                        // fallback: try emit_expr and assume it returns addr for struct
+                                        src = emit_expr(s, init);
+                                        // if it returned a value not addr, treat as addr for now
+                                        // for struct literals, need to handle differently
+                                }
+                                int sz = ssa_type_size(s, t);
+                                for (int off = 0; off < sz;) {
+                                        int remain = sz - off;
+                                        Ref saddr = off == 0 ? src : il_create_add_l(s->ilb, src, il_const_int_l(s->ilb, off));
+                                        Ref daddr = off == 0 ? slot : il_create_add_l(s->ilb, slot, il_const_int_l(s->ilb, off));
+                                        if (remain >= 8) {
+                                                Ref v = il_create_load_l(s->ilb, saddr);
+                                                il_create_store_l(s->ilb, v, daddr);
+                                                off += 8;
+                                        } else if (remain >= 4) {
+                                                Ref v = il_create_load_w(s->ilb, saddr);
+                                                il_create_store_w(s->ilb, v, daddr);
+                                                off += 4;
+                                        } else if (remain >= 2) {
+                                                Ref v = il_create_load_uh(s->ilb, saddr);
+                                                il_create_store_h(s->ilb, v, daddr);
+                                                off += 2;
+                                        } else {
+                                                Ref v = il_create_load_ub(s->ilb, saddr);
+                                                il_create_store_b(s->ilb, v, daddr);
+                                                off += 1;
+                                        }
+                                }
+                        } else if (n->data.var_decl.value->type == NODE_LIST_LITERAL) {
                                 ASTnode *lst = n->data.var_decl.value;
                                 int esz = ssa_type_size(s, t);
                                 for (int i = 0; i < lst->data.list_literal.count; i++) {
@@ -67,6 +103,10 @@ void emit_stmt(Ssagen *s, ASTnode *n) {
                                 }
                         } else {
                                 Ref v = emit_expr(s, n->data.var_decl.value);
+                                // promote Kw->Kl for var init if needed (e.g. uint64 var = int literal)
+                                int vc = quil_to_cls(n->data.var_decl.value->resolved_type);
+                                int tc = quil_to_cls(t);
+                                if (tc == Kl && vc == Kw) v = promote_kw_to_kl(s, n->data.var_decl.value, v);
                                 emit_store_elem(s, t, v, slot);
                         }
                 }
@@ -110,6 +150,47 @@ void emit_stmt(Ssagen *s, ASTnode *n) {
         }
         case NODE_RETURN: {
                 if (!n->data.returns.expression) {
+                        il_create_ret_void(s->ilb);
+                } else if (s->has_sret) {
+                        // struct return via hidden sret pointer
+                        ASTnode *re = n->data.returns.expression;
+                        Ref src;
+                        // if return expr is identifier/member/array, use its address; otherwise emit and copy via temp
+                        if (re->type == NODE_IDENTIFIER || re->type == NODE_MEMBER_ACCESS || re->type == NODE_ARRAY_ACCESS) {
+                                src = emit_obj_addr(s, re);
+                        } else {
+                                // for struct literal or call returning struct, emit to temp slot then use addr
+                                // emit_expr for struct call will allocate sret temp (handled in expr.c), so this path is for non-struct
+                                // fallback: emit value and store to sret (should not happen for struct)
+                                Ref v = emit_expr(s, re);
+                                // if struct call, v is already sret addr, just return
+                                il_create_ret_void(s->ilb);
+                                break;
+                        }
+                        int sz = ssa_type_size(s, re->resolved_type);
+                        // copy struct bytes to sret (handle 8/4/2/1)
+                        for (int off = 0; off < sz;) {
+                                int remain = sz - off;
+                                Ref src_addr = off == 0 ? src : il_create_add_l(s->ilb, src, il_const_int_l(s->ilb, off));
+                                Ref dst_addr = off == 0 ? s->sret : il_create_add_l(s->ilb, s->sret, il_const_int_l(s->ilb, off));
+                                if (remain >= 8) {
+                                        Ref v = il_create_load_l(s->ilb, src_addr);
+                                        il_create_store_l(s->ilb, v, dst_addr);
+                                        off += 8;
+                                } else if (remain >= 4) {
+                                        Ref v = il_create_load_w(s->ilb, src_addr);
+                                        il_create_store_w(s->ilb, v, dst_addr);
+                                        off += 4;
+                                } else if (remain >= 2) {
+                                        Ref v = il_create_load_uh(s->ilb, src_addr);
+                                        il_create_store_h(s->ilb, v, dst_addr);
+                                        off += 2;
+                                } else {
+                                        Ref v = il_create_load_ub(s->ilb, src_addr);
+                                        il_create_store_b(s->ilb, v, dst_addr);
+                                        off += 1;
+                                }
+                        }
                         il_create_ret_void(s->ilb);
                 } else {
                         Ref v = emit_expr(s, n->data.returns.expression);

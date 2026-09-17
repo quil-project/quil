@@ -13,6 +13,7 @@
 
 #include "../../feather/config.h"
 #include "../../include/error.h"
+#include "../../include/sema.h"
 #include "../../include/ssagen.h"
 #include <stdbool.h>
 #include <stdint.h>
@@ -41,6 +42,9 @@ typedef struct {
         char *cur_ns;
         Blk *break_target;
         Blk *continue_target;
+        Ref sret;           // sret pointer for struct return, R otherwise
+        bool has_sret;
+        HashMap *func_sigs; // mangled -> funcSig* (param types)
 } Ssagen;
 
 // types.c

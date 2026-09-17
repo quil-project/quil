@@ -194,18 +194,6 @@ Ref emit_expr(Ssagen *s, ASTnode *n) {
         }
         case NODE_FUNC_CALL: {
                 int nargs = n->data.func_call.arg_count;
-                Ref *args = NULL;
-                if (nargs > 0) {
-                        args = emalloc(sizeof(Ref) * (size_t)nargs);
-                        for (int i = 0; i < nargs; i++) {
-                                ASTnode *a = n->data.func_call.args[i];
-                                if (a->resolved_type && ssa_is_struct(s, a->resolved_type)) {
-                                        args[i] = emit_obj_addr(s, a);
-                                } else {
-                                        args[i] = emit_expr(s, a);
-                                }
-                        }
-                }
                 char *mangled = mangle(n->data.func_call.name);
                 bool is_ext = false;
                 if (s->externs) {
@@ -216,17 +204,81 @@ Ref emit_expr(Ssagen *s, ASTnode *n) {
                 Ref callee = is_ext ? il_extern_sym(s->ilb, mangled) : il_global_sym(s->ilb, mangled);
                 const char *rt = n->resolved_type;
                 bool is_void = (!rt || !strcmp(rt, "void"));
+                bool ret_is_struct = rt && ssa_is_struct(s, rt);
+                if (ret_is_struct) {
+                        int sz = ssa_type_size(s, rt);
+                        Ref tmp = il_create_alloc4(s->ilb, il_const_int_w(s->ilb, sz));
+                        // func sig for arg promotion
+                        funcSig *fs = NULL;
+                        bool found_fs = false;
+                        if (s->func_sigs) fs = hashmap_get(s->func_sigs, mangled, &found_fs);
+                        Ref *call_args = emalloc(sizeof(Ref) * (size_t)(nargs + 1));
+                        call_args[0] = tmp;
+                        for (int i = 0; i < nargs; i++) {
+                                ASTnode *a = n->data.func_call.args[i];
+                                Ref ar;
+                                if (a->resolved_type && ssa_is_struct(s, a->resolved_type)) {
+                                        ar = emit_obj_addr(s, a);
+                                } else {
+                                        ar = emit_expr(s, a);
+                                        if (found_fs && i < (int)fs->param_count) {
+                                                int pcls = quil_to_cls(fs->param_types[i]);
+                                                int acls = quil_to_cls(a->resolved_type);
+                                                if (pcls == Kl && acls == Kw) ar = promote_kw_to_kl(s, a, ar);
+                                        }
+                                }
+                                call_args[i + 1] = ar;
+                        }
+                        for (int i = 0; i < nargs + 1; i++) il_call_arg(s->ilb, call_args[i]);
+                        Ins ci = {.op = Ocall, .cls = Kw, .to = R, .arg = {callee, R}};
+                        addins(&s->ilb->cur->ins, &s->ilb->cur->nins, &ci);
+                        free(call_args);
+                        free(mangled);
+                        return tmp;
+                }
+                // non-struct return: handle arg promotion for Kl params
+                Ref *args = NULL;
+                if (nargs > 0) {
+                        args = emalloc(sizeof(Ref) * (size_t)nargs);
+                        funcSig *fs = NULL;
+                        bool found_fs = false;
+                        if (s->func_sigs) fs = hashmap_get(s->func_sigs, mangled, &found_fs);
+                        for (int i = 0; i < nargs; i++) {
+                                ASTnode *a = n->data.func_call.args[i];
+                                Ref ar;
+                                if (a->resolved_type && ssa_is_struct(s, a->resolved_type)) {
+                                        ar = emit_obj_addr(s, a);
+                                } else {
+                                        ar = emit_expr(s, a);
+                                        if (found_fs && i < (int)fs->param_count) {
+                                                int pcls = quil_to_cls(fs->param_types[i]);
+                                                int acls = quil_to_cls(a->resolved_type);
+                                                if (pcls == Kl && acls == Kw) ar = promote_kw_to_kl(s, a, ar);
+                                                else if (pcls == Kw && acls == Kl) {
+                                                        // trunc not needed for now
+                                                }
+                                        }
+                                }
+                                args[i] = ar;
+                        }
+                }
                 if (is_void) {
                         for (int i = 0; i < nargs; i++) il_call_arg(s->ilb, args[i]);
                         Ins ci = {.op = Ocall, .cls = Kw, .to = R, .arg = {callee, R}};
                         addins(&s->ilb->cur->ins, &s->ilb->cur->nins, &ci);
+                        free(mangled);
+                        free(args);
                         return CON_Z;
                 }
                 int cls = quil_to_cls(rt);
-                if (cls == Kl) return il_create_call_l(s->ilb, callee, args, nargs);
-                if (cls == Ks) return il_create_call_s(s->ilb, callee, args, nargs);
-                if (cls == Kd) return il_create_call_d(s->ilb, callee, args, nargs);
-                return il_create_call_w(s->ilb, callee, args, nargs);
+                Ref res;
+                if (cls == Kl) res = il_create_call_l(s->ilb, callee, args, nargs);
+                else if (cls == Ks) res = il_create_call_s(s->ilb, callee, args, nargs);
+                else if (cls == Kd) res = il_create_call_d(s->ilb, callee, args, nargs);
+                else res = il_create_call_w(s->ilb, callee, args, nargs);
+                free(mangled);
+                free(args);
+                return res;
         }
         default:
                 quil_error(STAGE_CODEGEN, ERR_UNKNOWN, node_type_name(n->type));
